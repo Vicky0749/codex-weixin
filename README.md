@@ -40,7 +40,7 @@
 
 ### 3. Codex CLI 原生命令
 
-微信端支持 `/status`、`/api`、`/new`、`/resume`、`/bind`、`/model`、`/effort`、`/stream`、`/prompt start`、`/prompt done` 和 `/stop`，可以管理 API、会话、工作目录、模型、推理强度和过程进度。
+微信端支持 `/status`、`/api`、`/new`、`/resume`、`/bind`、`/model`、`/effort`、`/stream`、`/goal`、`/目标`、`/prompt start`、`/prompt done` 和 `/stop`，可以管理 API、会话、工作目录、模型、推理强度、目标模式和过程进度。
 
 <p align="center">
   <img src="docs/images/screenshots/wechat-cli-commands.png" alt="在微信中使用 Codex CLI 原生命令" width="420" />
@@ -163,9 +163,12 @@ npm start
 /effort <序号|强度|default>    切换当前会话推理强度，或恢复继承设置
 /stream                       查看当前会话的过程进度设置
 /stream <on|off|default>       开启、关闭过程进度，或恢复继承全局设置
+/goal                         查看当前会话目标模式
+/goal <目标>                  开启目标模式并立即开始执行，空闲后自动续跑至完成或受阻
+/goal pause|resume|clear      暂停、恢复或清除目标；/goaloff、/目标解除可直接关闭目标
 /prompt start                 开始缓冲多条微信消息
 /prompt done                  将缓冲内容作为一次 Codex turn 提交
-/stop                         中断当前 Codex 任务
+/stop                         中断当前 Codex 任务；正在运行的目标会暂停
 ```
 
 `/api add` 会等待 2 分钟。期间下一条纯文本只用于验证 API，不会发送给 Codex 或写入会话记录；验证成功后使用 Windows DPAPI 加密保存，默认不自动切换。需要启用时再发送 `/api <编号>` 或 `/api use <名称>`。每个 API 独立保存默认模型和推理强度；切换 API 时会应用这组默认值，并清除旧会话的模型与推理强度覆盖。未知指令会提示发送 `/help`。

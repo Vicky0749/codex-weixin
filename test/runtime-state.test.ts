@@ -143,6 +143,50 @@ test("updates model, effort, and streaming by managed session id for Web control
   assert.equal(store.getSession(first.id)?.streamReplies, undefined);
 });
 
+test("persists a goal mode objective for each managed session", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-session-goal-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = resolveStatePaths(root);
+  const store = new RuntimeStateStore(paths);
+  const first = store.createSession("alice@im.wechat", "/work/one", "目标会话");
+
+  store.setGoal("alice@im.wechat", "完成本周发布并汇报结果");
+  assert.equal(store.getActiveSession("alice@im.wechat")?.goal, "完成本周发布并汇报结果");
+
+  const second = store.createSession("alice@im.wechat", "/work/two", "普通会话");
+  assert.equal(store.getActiveSession("alice@im.wechat")?.goal, undefined);
+
+  const reloaded = new RuntimeStateStore(paths);
+  reloaded.activateSession(first.id);
+  assert.equal(reloaded.getActiveSession("alice@im.wechat")?.goal, "完成本周发布并汇报结果");
+  reloaded.setGoal("alice@im.wechat");
+  assert.equal(reloaded.getActiveSession("alice@im.wechat")?.goal, undefined);
+  assert.equal(reloaded.getSession(second.id)?.goal, undefined);
+});
+
+test("persists the lifecycle state of a goal independently from its objective", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-goal-lifecycle-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = resolveStatePaths(root);
+  const store = new RuntimeStateStore(paths);
+  store.createSession("alice@im.wechat", "/work", "Goal lifecycle");
+
+  store.setGoal("alice@im.wechat", "完成发布并验证");
+  assert.equal(store.getActiveSession("alice@im.wechat")?.goalStatus, "active");
+
+  store.setGoalStatus("alice@im.wechat", "paused");
+  assert.equal(store.getActiveSession("alice@im.wechat")?.goalStatus, "paused");
+
+  store.setGoalStatus("alice@im.wechat", "completed");
+  const reloaded = new RuntimeStateStore(paths);
+  assert.equal(reloaded.getActiveSession("alice@im.wechat")?.goal, "完成发布并验证");
+  assert.equal(reloaded.getActiveSession("alice@im.wechat")?.goalStatus, "completed");
+
+  reloaded.setGoal("alice@im.wechat");
+  assert.equal(reloaded.getActiveSession("alice@im.wechat")?.goal, undefined);
+  assert.equal(reloaded.getActiveSession("alice@im.wechat")?.goalStatus, undefined);
+});
+
 test("persistently claims inbound message ids once and bounds the history", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-dedupe-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

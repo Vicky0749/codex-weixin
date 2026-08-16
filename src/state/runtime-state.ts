@@ -14,9 +14,13 @@ export type ManagedSession = {
   model?: string;
   effort?: string;
   streamReplies?: boolean;
+  goal?: string;
+  goalStatus?: GoalStatus;
   createdAt: string;
   updatedAt: string;
 };
+
+export type GoalStatus = "active" | "paused" | "completed" | "blocked";
 
 export type SessionRuntimeOverrides = {
   model?: string | null;
@@ -210,6 +214,33 @@ export class RuntimeStateStore {
     this.save();
   }
 
+  setGoal(senderId: string, goal?: string): void {
+    const session = this.mutableActiveSession(senderId);
+    if (!session) {
+      throw new Error(`No active session for sender: ${senderId}`);
+    }
+    const normalized = cleanGoal(goal);
+    if (normalized) {
+      session.goal = normalized;
+      session.goalStatus = "active";
+    } else {
+      delete session.goal;
+      delete session.goalStatus;
+    }
+    session.updatedAt = new Date().toISOString();
+    this.save();
+  }
+
+  setGoalStatus(senderId: string, status: GoalStatus): void {
+    const session = this.mutableActiveSession(senderId);
+    if (!session?.goal) {
+      throw new Error(`No active goal for sender: ${senderId}`);
+    }
+    session.goalStatus = status;
+    session.updatedAt = new Date().toISOString();
+    this.save();
+  }
+
   listSessions(): ManagedSession[] {
     return structuredClone(this.state.sessions)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -373,5 +404,10 @@ function cleanTitle(value?: string): string | undefined {
 
 function cleanPromptPreview(value?: string): string | undefined {
   const clean = value?.trim().replace(/\s+/g, " ").slice(0, 120);
+  return clean || undefined;
+}
+
+function cleanGoal(value?: string): string | undefined {
+  const clean = value?.trim().replace(/\s+/g, " ").slice(0, 500);
   return clean || undefined;
 }

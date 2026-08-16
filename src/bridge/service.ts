@@ -24,7 +24,7 @@ import {
   type CreateApiProfileInput
 } from "../state/api-profiles.js";
 import { isWorkspaceAllowed, type CodexWeixinConfig } from "../state/config.js";
-import { RuntimeStateStore, type ManagedSession } from "../state/runtime-state.js";
+import { RuntimeStateStore, type GoalStatus, type ManagedSession } from "../state/runtime-state.js";
 import { WeixinApiClient, isStaleContextError, type FetchLike } from "../weixin/api.js";
 import { downloadInboundAttachments, InboundMediaTooLargeError, sendLocalMediaFile } from "../weixin/media.js";
 import type { NormalizedWeixinMessage } from "../weixin/messages.js";
@@ -63,6 +63,7 @@ export type BridgeServiceOptions = {
   waitForRuntimeReady?: () => Promise<void> | undefined;
   apiProfiles?: ApiProfileCommandService;
   deferTask?: (task: () => Promise<void>) => void;
+  scheduleGoalContinuation?: (task: () => Promise<void>, delayMs: number) => void;
   retryDelay?: (retryAttempt: number) => Promise<void> | void;
 };
 
@@ -108,12 +109,18 @@ const API_KEY_WAIT_MS = 2 * 60_000;
 const API_SWITCH_CONFIRM_WAIT_MS = 2 * 60_000;
 const RUNNER_STOP_TIMEOUT_MS = 5_000;
 const MAX_RECOVERABLE_TURN_RETRIES = 20;
+const GOAL_CONTINUATION_DELAY_MS = 750;
+const GOAL_CONTINUATION_PROMPT = [
+  "继续推进当前目标。先核验已完成状态和上一轮证据，只做尚未完成的工作，避免重复外部操作。",
+  "除非目标已经有明确验证证据或确实受阻，否则继续使用可用工具执行下一步。"
+].join("\n");
 
 export class BridgeService {
   private access: AccessController;
   private readonly buffers: PromptBuffer;
   private runner: HybridCodexRunner;
   private readonly activeTurns = new Map<string, ActiveTurnControl>();
+  private readonly pendingGoalContinuations = new Set<string>();
   private readonly pendingApiProfileAdds = new Map<string, PendingApiProfileAdd>();
   private readonly pendingApiProfileOperations = new Map<string, PendingApiProfileOperation>();
 
@@ -147,6 +154,9 @@ export class BridgeService {
     this.options.stateStore.ensureActiveSession(message.senderId, this.options.config.defaultCwd);
 
     const command = parseCommand(message.text);
+    if (command?.name !== "stop") {
+      this.cancelGoalContinuation(message.senderId);
+    }
     const pendingApiAdd = this.pendingApiProfileAdds.get(message.senderId);
     if (pendingApiAdd && Date.now() >= pendingApiAdd.expiresAt) {
       this.pendingApiProfileAdds.delete(message.senderId);
@@ -241,6 +251,14 @@ export class BridgeService {
       case "stream":
         await this.handleStreamCommand(message.senderId, command.arg);
         return;
+      case "goal":
+      case "目标":
+        await this.handleGoalCommand(message, command.arg);
+        return;
+      case "goaloff":
+      case "目标解除":
+        await this.handleGoalCommand(message, "off");
+        return;
       case "prompt":
         await this.handlePromptCommand(message.senderId, command.arg);
         return;
@@ -248,12 +266,19 @@ export class BridgeService {
         await this.handleApiCommand(message.senderId, command.arg);
         return;
       case "stop": {
-        if (!this.cancelTurn(message.senderId)) {
+        const stopped = this.cancelTurn(message.senderId);
+        const cancelledContinuation = this.cancelGoalContinuation(message.senderId);
+        const pausedGoal = this.pauseActiveGoal(message.senderId);
+        if (!stopped && !cancelledContinuation && !pausedGoal) {
           await this.reply(message.senderId, "No active task.");
           return;
         }
-        this.requestRunnerStop(this.options.stateStore.getThread(message.senderId));
-        await this.reply(message.senderId, "Current task stopped.");
+        if (stopped) {
+          this.requestRunnerStop(this.options.stateStore.getThread(message.senderId));
+        }
+        await this.reply(message.senderId, pausedGoal
+          ? "Current task stopped.\n目标模式已暂停；发送 /goal resume 或 /目标 继续 恢复。"
+          : "Current task stopped.");
         return;
       }
       default:
@@ -306,6 +331,68 @@ export class BridgeService {
       default:
         await this.beginApiProfileActivation(senderId, input);
     }
+  }
+
+  private async handleGoalCommand(message: NormalizedWeixinMessage, arg: string): Promise<void> {
+    const input = arg.trim();
+    const activeSession = this.options.stateStore.getActiveSession(message.senderId);
+    if (!input) {
+      if (activeSession?.goal) {
+        await this.reply(message.senderId, [
+          `目标模式已开启（${goalStatusLabel(activeSession.goalStatus)}）。`,
+          `当前目标：${activeSession.goal}`,
+          goalContinuationHint(activeSession.goalStatus)
+        ].join("\n"));
+      } else {
+        await this.reply(message.senderId, "当前未开启目标模式。\n用法：/goal <目标> 或 /目标 <目标>");
+      }
+      return;
+    }
+
+    const operation = input.toLowerCase();
+    if (["off", "clear", "关闭", "清除", "退出", "停止"].includes(operation)) {
+      this.cancelGoalContinuation(message.senderId);
+      this.options.stateStore.setGoal(message.senderId);
+      const closeRequested = ["off", "关闭", "退出", "停止"].includes(operation);
+      await this.reply(message.senderId, closeRequested ? "目标模式已关闭。" : "目标模式已清除。");
+      return;
+    }
+
+    if (["pause", "暂停"].includes(operation)) {
+      if (!activeSession?.goal) {
+        await this.reply(message.senderId, "当前没有可暂停的目标。使用 /goal <目标> 开始。 ");
+        return;
+      }
+      this.cancelGoalContinuation(message.senderId);
+      this.options.stateStore.setGoalStatus(message.senderId, "paused");
+      await this.reply(message.senderId, "目标模式已暂停。当前任务不会再自动续跑；发送 /goal resume 或 /目标 继续 恢复。");
+      return;
+    }
+
+    if (["resume", "继续", "恢复"].includes(operation)) {
+      if (!activeSession?.goal) {
+        await this.reply(message.senderId, "当前没有可恢复的目标。使用 /goal <目标> 开始。 ");
+        return;
+      }
+      if (activeSession.goalStatus === "completed" || activeSession.goalStatus === "blocked") {
+        await this.reply(message.senderId, `当前目标已${goalStatusLabel(activeSession.goalStatus)}。发送 /goal <目标> 可重新开始一个目标。`);
+        return;
+      }
+      this.options.stateStore.setGoalStatus(message.senderId, "active");
+      this.scheduleGoalContinuation(message.senderId);
+      await this.reply(message.senderId, "目标模式已恢复，将在当前会话空闲后继续推进。");
+      return;
+    }
+
+    this.cancelGoalContinuation(message.senderId);
+    this.options.stateStore.setGoal(message.senderId, input);
+    const goal = this.options.stateStore.getActiveSession(message.senderId)?.goal ?? input;
+    await this.reply(message.senderId, [
+      "目标模式已开启。",
+      `当前目标：${goal}`,
+      "已开始执行；后续消息会继续围绕该目标推进。"
+    ].join("\n"));
+    await this.runCodexTurn(message, input);
   }
 
   private async replyApiProfileList(senderId: string): Promise<void> {
@@ -858,7 +945,8 @@ export class BridgeService {
     message: NormalizedWeixinMessage,
     text: string,
     attachments: PromptBufferItem[] = [],
-    existingControl?: ActiveTurnControl
+    existingControl?: ActiveTurnControl,
+    isGoalContinuation = false
   ): Promise<void> {
     const control = existingControl ?? this.beginTurn(message.senderId);
     const ownsControl = !existingControl;
@@ -879,7 +967,7 @@ export class BridgeService {
         console.log(`[codex-weixin] starting Codex turn for ${message.senderId} in ${workspace}`);
         const turnResult = await this.runUntilVisibleFinalReport({
           senderId: message.senderId,
-          prompt: buildPrompt(text, attachments),
+          prompt: buildPrompt(withGoalModePrompt(text, isGoalActive(session) ? session.goal : undefined), attachments),
           workspace,
           threadId,
           model: session.model ?? this.options.config.model,
@@ -914,6 +1002,7 @@ export class BridgeService {
           if (control.cancelled) return;
           await this.sendLocalMedia(message.senderId, action);
         }
+        this.reconcileGoalAfterTurn(message.senderId, result, isGoalContinuation);
       });
     } catch (error) {
       if (!control.cancelled) throw error;
@@ -938,11 +1027,13 @@ export class BridgeService {
     let threadId = input.threadId;
 
     while (true) {
+      const session = this.options.stateStore.getActiveSession(input.senderId);
+      const goal = isGoalActive(session) ? session.goal : undefined;
       const prompt = retryAttempt > 0 && threadId
-        ? buildPrompt([
+        ? buildPrompt(withGoalModePrompt([
           "上一轮任务因内部未分类错误中断。请从当前会话继续完成上一轮任务。",
           "先核验已完成状态，避免重复已经完成的外部操作；只完成尚未完成的部分，并直接给出最终结果。"
-        ].join("\n"))
+        ].join("\n"), goal))
         : input.prompt;
       try {
         return await this.runner.run({
@@ -1034,7 +1125,12 @@ export class BridgeService {
       }
       result = await this.runWithUnclassifiedRetries({
         ...input,
-        prompt: buildPrompt(MISSING_FINAL_REPORT_PROMPT),
+        prompt: buildPrompt(withGoalModePrompt(
+          MISSING_FINAL_REPORT_PROMPT,
+          isGoalActive(this.options.stateStore.getActiveSession(input.senderId))
+            ? this.options.stateStore.getActiveSession(input.senderId)?.goal
+            : undefined
+        )),
         threadId,
         onProgress: undefined
       });
@@ -1052,6 +1148,76 @@ export class BridgeService {
       ? Math.min(retryAttempt * 5_000, 60_000)
       : Math.min(retryAttempt * 1_000, 10_000);
     await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  private reconcileGoalAfterTurn(
+    senderId: string,
+    result: { raw: string; text: string; threadId?: string },
+    isGoalContinuation: boolean
+  ): void {
+    const session = this.options.stateStore.getActiveSession(senderId);
+    if (!isGoalActive(session)) return;
+
+    const outcome = goalOutcomeFromText(result.text);
+    if (outcome === "completed") {
+      this.cancelGoalContinuation(senderId);
+      this.options.stateStore.setGoalStatus(senderId, "completed");
+      return;
+    }
+    if (outcome === "blocked") {
+      this.cancelGoalContinuation(senderId);
+      this.options.stateStore.setGoalStatus(senderId, "blocked");
+      return;
+    }
+    if (!isGoalContinuation || hasGoalToolActivity(result.raw)) {
+      this.scheduleGoalContinuation(senderId);
+    }
+  }
+
+  private scheduleGoalContinuation(senderId: string): void {
+    if (this.pendingGoalContinuations.has(senderId)) return;
+    const session = this.options.stateStore.getActiveSession(senderId);
+    if (!isGoalActive(session)) return;
+
+    this.pendingGoalContinuations.add(senderId);
+    const task = async () => {
+      if (!this.pendingGoalContinuations.delete(senderId)) return;
+      const latest = this.options.stateStore.getActiveSession(senderId);
+      if (!isGoalActive(latest) || this.activeTurns.has(senderId)) return;
+      try {
+        await this.runCodexTurn({
+          id: `goal-continuation-${Date.now()}`,
+          senderId,
+          text: GOAL_CONTINUATION_PROMPT,
+          attachments: [],
+          raw: {}
+        }, GOAL_CONTINUATION_PROMPT, [], undefined, true);
+      } catch (error) {
+        const current = this.options.stateStore.getActiveSession(senderId);
+        if (!isGoalActive(current)) return;
+        this.options.stateStore.setGoalStatus(senderId, "blocked");
+        await this.reply(senderId, `目标自动续跑受阻：${error instanceof Error ? error.message : String(error)}\n发送 /goal resume 可在问题恢复后继续。`);
+      }
+    };
+    if (this.options.scheduleGoalContinuation) {
+      this.options.scheduleGoalContinuation(task, GOAL_CONTINUATION_DELAY_MS);
+      return;
+    }
+    const timer = setTimeout(() => {
+      void task();
+    }, GOAL_CONTINUATION_DELAY_MS);
+    timer.unref();
+  }
+
+  private cancelGoalContinuation(senderId: string): boolean {
+    return this.pendingGoalContinuations.delete(senderId);
+  }
+
+  private pauseActiveGoal(senderId: string): boolean {
+    const session = this.options.stateStore.getActiveSession(senderId);
+    if (!isGoalActive(session)) return false;
+    this.options.stateStore.setGoalStatus(senderId, "paused");
+    return true;
   }
 
   private beginTurn(senderId: string): ActiveTurnControl {
@@ -1157,7 +1323,8 @@ export class BridgeService {
       `exec sandbox: ${this.options.config.codexExecSandbox ?? "(Codex default)"}`,
       `model: ${runtime.model ?? "(Codex default)"}`,
       `effort: ${runtime.effort ?? "(Codex default)"}`,
-      `stream replies: ${(session?.streamReplies ?? this.options.config.streamReplies) ? "on" : "off"}${typeof session?.streamReplies === "boolean" ? " (session)" : " (global)"}`
+      `stream replies: ${(session?.streamReplies ?? this.options.config.streamReplies) ? "on" : "off"}${typeof session?.streamReplies === "boolean" ? " (session)" : " (global)"}`,
+      `goal mode: ${session?.goal ? `${goalStatusLabel(session.goalStatus)} - ${session.goal}` : "off"}`
     ].join("\n");
   }
 
@@ -1207,14 +1374,24 @@ export class BridgeService {
 
   async cancelActiveTurns(notice?: string): Promise<number> {
     const runner = this.runner;
-    const senderIds = [...this.activeTurns.keys()].filter((senderId) => this.cancelTurn(senderId));
-    if (notice) {
-      await Promise.allSettled(senderIds.map((senderId) => this.reply(senderId, notice)));
+    const senderIds = new Set([
+      ...this.activeTurns.keys(),
+      ...this.pendingGoalContinuations
+    ]);
+    const activeTurnSenderIds = [...this.activeTurns.keys()].filter((senderId) => this.cancelTurn(senderId));
+    for (const senderId of this.pendingGoalContinuations) {
+      this.cancelGoalContinuation(senderId);
     }
     for (const senderId of senderIds) {
+      this.pauseActiveGoal(senderId);
+    }
+    if (notice) {
+      await Promise.allSettled(activeTurnSenderIds.map((senderId) => this.reply(senderId, notice)));
+    }
+    for (const senderId of activeTurnSenderIds) {
       this.requestRunnerStop(this.options.stateStore.getThread(senderId), runner);
     }
-    return senderIds.length;
+    return activeTurnSenderIds.length;
   }
 
   replaceRuntime(runner: HybridCodexRunner, config: CodexWeixinConfig): void {
@@ -1270,6 +1447,8 @@ function helpText(): string {
     "/model [编号|模型ID|default] - 查看或切换当前会话模型",
     "/effort [编号|等级|default] - 查看或切换推理强度",
     "/stream [on|off|default] - 查看或切换流式进度",
+    "/goal [目标|pause|resume|clear] - 开启、查看、暂停、恢复或清除当前会话目标",
+    "/目标 [目标|暂停|继续|清除] - /goal 的中文别名；/goaloff、/目标解除可直接关闭目标",
     "/prompt start - 开始缓存多条消息",
     "/prompt done - 提交已缓存消息",
     "/stop - 立即中止当前 Codex 任务"
@@ -1327,6 +1506,54 @@ function formatSessionTime(value: string): string {
   if (Number.isNaN(date.getTime())) return "时间未知";
   const pad = (part: number) => String(part).padStart(2, "0");
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function withGoalModePrompt(text: string, goal?: string): string {
+  if (!goal) return text;
+  return [
+    "【目标模式】",
+    `当前持久目标：${goal}`,
+    "将本轮用户消息视为推进该目标的指令。先核验已有进度，持续执行尚未完成的工作；不要重复已完成操作。",
+    "每轮最终汇报都必须包含以下区块：\n【目标状态】\n状态：进行中、已完成或受阻（三选一）\n证据：实际执行的命令、测试、文件、日志或其他可核验结果\n下一步：未完成时的下一项操作，完成时写无。",
+    "只有在目标已通过上述具体证据验证时才能写“已完成”；缺少证据、尚有工作或只是提出计划时必须写“进行中”。",
+    "",
+    "本轮用户消息：",
+    text.trim() || "请立即开始推进当前目标。"
+  ].join("\n");
+}
+
+function isGoalActive(session?: ManagedSession): session is ManagedSession & { goal: string } {
+  if (!session?.goal) return false;
+  return session.goalStatus === undefined || session.goalStatus === "active";
+}
+
+function goalStatusLabel(status?: GoalStatus): string {
+  if (status === "paused") return "已暂停";
+  if (status === "completed") return "已完成";
+  if (status === "blocked") return "受阻";
+  return "进行中";
+}
+
+function goalContinuationHint(status?: GoalStatus): string {
+  if (status === "paused") return "发送 /goal resume 或 /目标 继续 恢复。";
+  if (status === "completed" || status === "blocked") return "发送 /goal <目标> 可重新开始一个目标，或 /goal clear 清除。";
+  return "目标会在会话空闲后持续推进；发送 /goal pause 暂停，/goal clear 清除。";
+}
+
+function goalOutcomeFromText(text: string): "completed" | "blocked" | "in_progress" | undefined {
+  const block = /【目标状态】([\s\S]{0,800})/u.exec(text)?.[1] ?? "";
+  const status = /状态\s*[：:]\s*(进行中|未完成|已完成|完成|受阻|需要用户操作)/u.exec(block)?.[1];
+  if (!status) return undefined;
+  if (/已完成|完成/u.test(status)) {
+    const evidence = /(?:证据|验证)\s*[：:]\s*([^\n]+)/u.exec(block)?.[1]?.trim();
+    return evidence ? "completed" : "in_progress";
+  }
+  if (/受阻|需要用户操作/u.test(status)) return "blocked";
+  return "in_progress";
+}
+
+function hasGoalToolActivity(raw: string): boolean {
+  return /"type"\s*:\s*"(?:commandExecution|fileChange|mcpToolCall|webSearch|computer|applyPatch|execCommand)"/u.test(raw);
 }
 
 const fallbackEfforts = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];

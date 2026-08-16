@@ -583,6 +583,265 @@ test("lists API profiles and includes API commands in help and status", async (t
   assert.match(replies.at(-1) ?? "", /\/help/);
 });
 
+test("runs persistent goal mode through English and Chinese goal commands", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-goal-command-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
+  const replies: string[] = [];
+  const runs: Array<Record<string, unknown>> = [];
+  const service = new BridgeService({
+    config: { ...defaultConfig(tmpDir), allowedSenderIds: ["alice@im.wechat"] },
+    stateStore,
+    weixin: {
+      async sendTyping() {},
+      async sendText(input: { text: string }) {
+        replies.push(input.text);
+        return { messageId: `reply-${replies.length}` };
+      }
+    } as never,
+    runner: {
+      async run(input: Record<string, unknown>) {
+        runs.push(input);
+        return { raw: "", text: "【本轮处理结果】\n状态：目标进行中\n已处理：已开始执行。", threadId: `goal-thread-${runs.length}` };
+      },
+      async stop() {}
+    } as never
+  });
+  const send = (id: string, text: string) => service.handleMessage({
+    id,
+    senderId: "alice@im.wechat",
+    contextToken: "ctx",
+    text,
+    raw: {}
+  });
+
+  await send("goal-start", "/goal 完成本周发布并汇报结果");
+  assert.equal(stateStore.getActiveSession("alice@im.wechat")?.goal, "完成本周发布并汇报结果");
+  assert.equal(runs.length, 1);
+  assert.match(String(runs[0]?.prompt), /目标模式/);
+  assert.match(String(runs[0]?.prompt), /完成本周发布并汇报结果/);
+
+  await send("goal-follow-up", "先检查当前进度");
+  assert.equal(runs.length, 2);
+  assert.match(String(runs[1]?.prompt), /当前持久目标：完成本周发布并汇报结果/);
+
+  await send("goal-status", "/目标");
+  assert.match(replies.at(-1) ?? "", /目标模式已开启/);
+  assert.match(replies.at(-1) ?? "", /完成本周发布并汇报结果/);
+
+  await send("goal-stop", "/目标 关闭");
+  assert.equal(stateStore.getActiveSession("alice@im.wechat")?.goal, undefined);
+  assert.match(replies.at(-1) ?? "", /目标模式已关闭/);
+
+  await send("goal-off-follow-up", "继续处理普通消息");
+  assert.equal(runs.length, 3);
+  assert.doesNotMatch(String(runs[2]?.prompt), /当前持久目标/);
+
+  await send("goal-chinese-start", "/目标 整理客户资料");
+  assert.equal(stateStore.getActiveSession("alice@im.wechat")?.goal, "整理客户资料");
+  assert.equal(runs.length, 4);
+  assert.match(String(runs[3]?.prompt), /整理客户资料/);
+
+  await send("goal-cleanup", "/goal clear");
+});
+
+test("accepts compact English and Chinese goal clear aliases", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-goal-clear-alias-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
+  const replies: string[] = [];
+  const service = new BridgeService({
+    config: { ...defaultConfig(tmpDir), allowedSenderIds: ["alice@im.wechat"] },
+    stateStore,
+    weixin: {
+      async sendTyping() {},
+      async sendText(input: { text: string }) {
+        replies.push(input.text);
+        return { messageId: `reply-${replies.length}` };
+      }
+    } as never,
+    runner: {
+      async run() {
+        return { raw: "", text: "【目标状态】\n状态：进行中\n证据：已开始处理。\n下一步：继续处理。" };
+      },
+      async stop() {}
+    } as never
+  });
+  const send = (id: string, text: string) => service.handleMessage({
+    id,
+    senderId: "alice@im.wechat",
+    contextToken: "ctx",
+    text,
+    raw: {}
+  });
+
+  await send("english-start", "/goal 完成发布并验证");
+  await send("english-clear", "/goaloff");
+  assert.equal(stateStore.getActiveSession("alice@im.wechat")?.goal, undefined);
+  assert.match(replies.at(-1) ?? "", /目标模式已关闭/);
+
+  await send("chinese-start", "/目标 完成发布并验证");
+  await send("chinese-clear", "/目标解除");
+  assert.equal(stateStore.getActiveSession("alice@im.wechat")?.goal, undefined);
+  assert.match(replies.at(-1) ?? "", /目标模式已关闭/);
+});
+
+test("continues an active goal at an idle boundary until evidence marks it complete", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-goal-continuation-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
+  const scheduled: Array<() => Promise<void>> = [];
+  const runs: Array<Record<string, unknown>> = [];
+  const service = new BridgeService({
+    config: { ...defaultConfig(tmpDir), allowedSenderIds: ["alice@im.wechat"] },
+    stateStore,
+    scheduleGoalContinuation(task) {
+      scheduled.push(task);
+    },
+    weixin: {
+      async sendTyping() {},
+      async sendText() { return { messageId: "reply" }; }
+    } as never,
+    runner: {
+      async run(input: Record<string, unknown>) {
+        runs.push(input);
+        if (runs.length === 1) {
+          return {
+            raw: '{"params":{"item":{"type":"commandExecution"}}}',
+            threadId: "goal-thread",
+            text: "【本轮处理结果】\n【目标状态】\n状态：进行中\n证据：已运行发布前检查。\n下一步：修复检查发现的问题。"
+          };
+        }
+        return {
+          raw: '{"params":{"item":{"type":"commandExecution"}}}',
+          threadId: "goal-thread",
+          text: "【本轮处理结果】\n【目标状态】\n状态：已完成\n证据：发布检查和完整测试均已通过。\n下一步：无。"
+        };
+      },
+      async stop() {}
+    } as never
+  });
+
+  await service.handleMessage({
+    id: "goal-start",
+    senderId: "alice@im.wechat",
+    contextToken: "ctx",
+    text: "/goal 完成发布并验证",
+    raw: {}
+  });
+
+  assert.equal(runs.length, 1);
+  assert.equal(scheduled.length, 1);
+  assert.equal(stateStore.getActiveSession("alice@im.wechat")?.goalStatus, "active");
+
+  await scheduled.shift()?.();
+  assert.equal(runs.length, 2);
+  assert.match(String(runs[1]?.prompt), /继续推进当前目标/);
+  assert.equal(stateStore.getActiveSession("alice@im.wechat")?.goalStatus, "completed");
+  assert.equal(scheduled.length, 0);
+});
+
+test("pauses a queued goal continuation when the user sends stop", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-goal-stop-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
+  const scheduled: Array<() => Promise<void>> = [];
+  const replies: string[] = [];
+  let runs = 0;
+  const service = new BridgeService({
+    config: { ...defaultConfig(tmpDir), allowedSenderIds: ["alice@im.wechat"] },
+    stateStore,
+    scheduleGoalContinuation(task) {
+      scheduled.push(task);
+    },
+    weixin: {
+      async sendTyping() {},
+      async sendText(input: { text: string }) {
+        replies.push(input.text);
+        return { messageId: `reply-${replies.length}` };
+      }
+    } as never,
+    runner: {
+      async run() {
+        runs += 1;
+        return {
+          raw: '{"params":{"item":{"type":"commandExecution"}}}',
+          threadId: "goal-thread",
+          text: "【目标状态】\n状态：进行中\n证据：已完成一个检查。\n下一步：继续处理。"
+        };
+      },
+      async stop() {}
+    } as never
+  });
+
+  await service.handleMessage({
+    id: "goal-start",
+    senderId: "alice@im.wechat",
+    contextToken: "ctx",
+    text: "/goal 完成发布并验证",
+    raw: {}
+  });
+  assert.equal(scheduled.length, 1);
+
+  await service.handleMessage({
+    id: "stop",
+    senderId: "alice@im.wechat",
+    contextToken: "ctx",
+    text: "/stop",
+    raw: {}
+  });
+
+  assert.equal(stateStore.getActiveSession("alice@im.wechat")?.goalStatus, "paused");
+  assert.match(replies.at(-1) ?? "", /目标模式已暂停/);
+  await scheduled.shift()?.();
+  assert.equal(runs, 1);
+});
+
+test("pauses a queued goal continuation when the bridge interrupts tasks", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-goal-interrupt-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
+  const scheduled: Array<() => Promise<void>> = [];
+  let runs = 0;
+  const service = new BridgeService({
+    config: { ...defaultConfig(tmpDir), allowedSenderIds: ["alice@im.wechat"] },
+    stateStore,
+    scheduleGoalContinuation(task) {
+      scheduled.push(task);
+    },
+    weixin: {
+      async sendTyping() {},
+      async sendText() { return { messageId: "reply" }; }
+    } as never,
+    runner: {
+      async run() {
+        runs += 1;
+        return {
+          raw: '{"params":{"item":{"type":"commandExecution"}}}',
+          threadId: "goal-thread",
+          text: "【目标状态】\n状态：进行中\n证据：已完成一个检查。\n下一步：继续处理。"
+        };
+      },
+      async stop() {}
+    } as never
+  });
+
+  await service.handleMessage({
+    id: "goal-start",
+    senderId: "alice@im.wechat",
+    contextToken: "ctx",
+    text: "/goal 完成发布并验证",
+    raw: {}
+  });
+  assert.equal(scheduled.length, 1);
+
+  await service.cancelActiveTurns();
+
+  assert.equal(stateStore.getActiveSession("alice@im.wechat")?.goalStatus, "paused");
+  await scheduled.shift()?.();
+  assert.equal(runs, 1);
+});
+
 test("captures the next message as an API key and saves only after verification", async (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-api-add-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
