@@ -8,8 +8,6 @@ import {
   buildPromptPreview,
   chunkText,
   hasVisibleFinalReport,
-  MAX_FINAL_REPORT_RECOVERY_ATTEMPTS,
-  MISSING_FINAL_REPORT_FALLBACK,
   MISSING_FINAL_REPORT_PROMPT,
   parsePrompt
 } from "./format.js";
@@ -108,7 +106,6 @@ type PendingApiProfileOperationInput =
 const API_KEY_WAIT_MS = 2 * 60_000;
 const API_SWITCH_CONFIRM_WAIT_MS = 2 * 60_000;
 const RUNNER_STOP_TIMEOUT_MS = 5_000;
-const MAX_RECOVERABLE_TURN_RETRIES = 20;
 const GOAL_CONTINUATION_DELAY_MS = 750;
 const GOAL_CONTINUATION_PROMPT = [
   "继续推进当前目标。先核验已完成状态和上一轮证据，只做尚未完成的工作，避免重复外部操作。",
@@ -152,6 +149,7 @@ export class BridgeService {
     }
     this.options.stateStore.setPairedSenderIds(this.access.listPairedSenderIds());
     this.options.stateStore.ensureActiveSession(message.senderId, this.options.config.defaultCwd);
+    await this.flushPendingDeliveries(message.senderId);
 
     const command = parseCommand(message.text);
     if (command?.name !== "stop") {
@@ -991,7 +989,7 @@ export class BridgeService {
         if (remaining.length) {
           for (const chunk of remaining) {
             if (control.cancelled) return;
-            await this.reply(message.senderId, chunk);
+            await this.reply(message.senderId, chunk, true);
           }
         }
         const actionsByPath = new Map<string, SendAction>();
@@ -1055,16 +1053,9 @@ export class BridgeService {
         retryAttempt += 1;
         threadId = this.options.stateStore.getThread(input.senderId) ?? threadId;
         const errorMessage = error instanceof Error ? error.message : String(error);
-        if (retryAttempt > MAX_RECOVERABLE_TURN_RETRIES) {
-          console.error(
-            `[codex-weixin] recoverable turn failed after ${MAX_RECOVERABLE_TURN_RETRIES} retries for ${input.senderId}; `
-            + `thread=${threadId ?? "(new)"}; error=${errorMessage}`
-          );
-          throw error;
-        }
         console.warn(
           `[codex-weixin] recoverable turn failure for ${input.senderId}; `
-          + `retrying attempt ${retryAttempt}/${MAX_RECOVERABLE_TURN_RETRIES}; `
+          + `retrying attempt ${retryAttempt}; `
           + `thread=${threadId ?? "(new)"}; error=${errorMessage}`
         );
         await this.waitBeforeUnclassifiedRetry(retryAttempt, error);
@@ -1102,16 +1093,6 @@ export class BridgeService {
       }
       if (input.isCancelled()) {
         return { result, pendingSendActions: [...pendingSendActions.values()] };
-      }
-      if (reportRetryAttempt >= MAX_FINAL_REPORT_RECOVERY_ATTEMPTS) {
-        console.error(
-          `[codex-weixin] turn for ${input.senderId} did not provide a visible final report after `
-          + `${MAX_FINAL_REPORT_RECOVERY_ATTEMPTS} recovery attempts; ending the turn`
-        );
-        return {
-          result: { ...result, text: MISSING_FINAL_REPORT_FALLBACK },
-          pendingSendActions: [...pendingSendActions.values()]
-        };
       }
       reportRetryAttempt += 1;
       const threadId = result.threadId ?? this.options.stateStore.getThread(input.senderId) ?? input.threadId;
@@ -1353,16 +1334,44 @@ export class BridgeService {
     };
   }
 
-  private async reply(senderId: string, text: string): Promise<void> {
+  private async flushPendingDeliveries(senderId: string): Promise<void> {
+    for (const delivery of this.options.stateStore.listPendingDeliveries(senderId)) {
+      try {
+        const delivered = await this.reply(senderId, delivery.text);
+        if (!delivered) return;
+        this.options.stateStore.removePendingDelivery(delivery.id);
+      } catch (error) {
+        console.warn(
+          `[codex-weixin] pending reply remains queued for ${senderId}: `
+          + `${error instanceof Error ? error.message : String(error)}`
+        );
+        return;
+      }
+    }
+  }
+
+  private async reply(senderId: string, text: string, deferOnFailure = false): Promise<boolean> {
     const contextToken = this.options.stateStore.getContextToken(senderId);
     try {
       console.log(`[codex-weixin] sending reply to ${senderId}; text=${text.length} chars`);
       await this.options.weixin.sendText({ toUserId: senderId, text, contextToken });
       console.log(`[codex-weixin] sent reply to ${senderId}`);
+      return true;
     } catch (error) {
       if (isStaleContextError(error)) {
-        console.warn(`WeChat context token is stale for ${senderId}; ask user to send a fresh message.`);
-        return;
+        if (deferOnFailure) {
+          this.options.stateStore.queuePendingDelivery(senderId, text);
+        }
+        console.warn(`WeChat sendmessage rejected for ${senderId}: ${error instanceof Error ? error.message : String(error)}. Will retry on next inbound message.`);
+        return false;
+      }
+      if (deferOnFailure) {
+        this.options.stateStore.queuePendingDelivery(senderId, text);
+        console.warn(
+          `[codex-weixin] final reply could not be delivered to ${senderId}: `
+          + `${error instanceof Error ? error.message : String(error)}. Will retry on next inbound message.`
+        );
+        return false;
       }
       throw error;
     }

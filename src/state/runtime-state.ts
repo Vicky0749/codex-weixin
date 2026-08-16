@@ -89,6 +89,31 @@ export class RuntimeStateStore {
     return this.state.contextTokens[senderId];
   }
 
+  listPendingDeliveries(senderId: string): RuntimeState["pendingDeliveries"] {
+    return this.state.pendingDeliveries
+      .filter((delivery) => delivery.senderId === senderId)
+      .map((delivery) => ({ ...delivery }));
+  }
+
+  queuePendingDelivery(senderId: string, text: string): void {
+    const normalized = text.trim();
+    if (!normalized) return;
+    this.state.pendingDeliveries.push({
+      id: crypto.randomUUID(),
+      senderId,
+      text: normalized,
+      createdAt: new Date().toISOString()
+    });
+    this.save();
+  }
+
+  removePendingDelivery(deliveryId: string): void {
+    const next = this.state.pendingDeliveries.filter((delivery) => delivery.id !== deliveryId);
+    if (next.length === this.state.pendingDeliveries.length) return;
+    this.state.pendingDeliveries = next;
+    this.save();
+  }
+
   getLastActiveSenderId(): string | undefined {
     return this.state.lastActiveSenderId;
   }

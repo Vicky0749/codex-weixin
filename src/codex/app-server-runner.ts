@@ -768,8 +768,10 @@ export class AppServerCodexRunner {
   }
 
   private turnStallTimeoutMs(): number | undefined {
-    const timeoutMs = this.options.turnStallTimeoutMs ?? 90_000;
-    return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : undefined;
+    const timeoutMs = this.options.turnStallTimeoutMs;
+    return typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : undefined;
   }
 
   private async runStreamCallback(

@@ -175,6 +175,16 @@ test("does not apply the request timeout to a running turn", async (t) => {
   assert.equal(result.text, "reply:slow");
 });
 
+test("does not impose a default inactivity deadline on a running turn", (t) => {
+  const runner = new AppServerCodexRunner({
+    codexBin: path.join(fixturesDir, "fake-codex-app-server.mjs")
+  });
+  t.after(() => runner.close());
+
+  const getTurnStallTimeout = runner as unknown as { turnStallTimeoutMs: () => number | undefined };
+  assert.equal(getTurnStallTimeout.turnStallTimeoutMs(), undefined);
+});
+
 test("recovers a completed turn when the app-server misses turn/completed", { timeout: 3_000 }, async (t) => {
   const runner = new AppServerCodexRunner({
     codexBin: path.join(fixturesDir, "fake-codex-app-server.mjs"),

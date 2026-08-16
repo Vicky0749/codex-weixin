@@ -211,3 +211,17 @@ test("stores the latest WeChat sync key across monitor restarts", (t) => {
   store.setSyncKey("sync-next");
   assert.equal(store.getSyncKey(), "sync-next");
 });
+
+test("keeps repeated pending deliveries in their original order", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-pending-delivery-state-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const store = new RuntimeStateStore(resolveStatePaths(root));
+
+  store.queuePendingDelivery("alice@im.wechat", "同一段最终结果");
+  store.queuePendingDelivery("alice@im.wechat", "同一段最终结果");
+
+  assert.deepEqual(
+    store.listPendingDeliveries("alice@im.wechat").map((delivery) => delivery.text),
+    ["同一段最终结果", "同一段最终结果"]
+  );
+});

@@ -6,10 +6,11 @@ import path from "node:path";
 import test from "node:test";
 
 import { BridgeService } from "../src/bridge/service.js";
-import { buildPrompt, MISSING_FINAL_REPORT_FALLBACK } from "../src/bridge/format.js";
+import { buildPrompt } from "../src/bridge/format.js";
 import { defaultConfig, MAX_INBOUND_BYTES } from "../src/state/config.js";
 import { resolveStatePaths } from "../src/state/paths.js";
 import { RuntimeStateStore } from "../src/state/runtime-state.js";
+import { WeixinApiError } from "../src/weixin/api.js";
 import { encryptAesEcb } from "../src/weixin/media.js";
 import { normalizeWeixinMessage } from "../src/weixin/messages.js";
 
@@ -2117,13 +2118,14 @@ test("continues a WeChat turn until Codex provides a visible final report", asyn
   assert.deepEqual(replies, [finalReport]);
 });
 
-test("ends a WeChat turn after bounded missing-final-report recovery attempts", async (t) => {
+test("keeps requesting a final report beyond the historical recovery limit", async (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-missing-terminal-report-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
   const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
   const replies: string[] = [];
   const typingStates: boolean[] = [];
   let runs = 0;
+  const finalReport = "【本轮处理结果】\n状态：已完成\n已处理：已补回最终汇报。";
   const service = new BridgeService({
     config: {
       ...defaultConfig(tmpDir),
@@ -2143,7 +2145,11 @@ test("ends a WeChat turn after bounded missing-final-report recovery attempts", 
     runner: {
       async run() {
         runs += 1;
-        return { raw: "", text: "", threadId: "thread-missing-terminal-report" };
+        return {
+          raw: "",
+          text: runs <= 4 ? "" : finalReport,
+          threadId: "thread-missing-terminal-report"
+        };
       },
       async stop() {}
     } as never
@@ -2157,8 +2163,8 @@ test("ends a WeChat turn after bounded missing-final-report recovery attempts", 
     raw: {}
   });
 
-  assert.equal(runs, 4);
-  assert.deepEqual(replies, [MISSING_FINAL_REPORT_FALLBACK]);
+  assert.equal(runs, 5);
+  assert.deepEqual(replies, [finalReport]);
   assert.deepEqual(typingStates, [true, false]);
 });
 
@@ -2219,7 +2225,7 @@ test("automatically resumes a recoverable failed turn up to ten times", async (t
   assert.deepEqual(replies, ["恢复完成"]);
 });
 
-test("keeps recovering a transient turn through twenty retries", async (t) => {
+test("keeps recovering a transient turn beyond the historical twenty-retry limit", async (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-unclassified-retry-unbounded-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
   const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
@@ -2242,7 +2248,7 @@ test("keeps recovering a transient turn through twenty retries", async (t) => {
     runner: {
       async run() {
         calls += 1;
-        if (calls <= 20) {
+        if (calls <= 21) {
           throw new Error("stream disconnected before completion: stream closed before response.completed");
         }
         return { raw: "", text: "恢复完成" };
@@ -2259,15 +2265,17 @@ test("keeps recovering a transient turn through twenty retries", async (t) => {
     raw: {}
   });
 
-  assert.equal(calls, 21);
+  assert.equal(calls, 22);
   assert.deepEqual(replies, ["恢复完成"]);
 });
 
-test("ends a persistently disconnected turn after twenty retries", async (t) => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-retry-limit-"));
+test("defers a final report until a fresh WeChat context token is available", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-pending-delivery-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
   const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
-  let calls = 0;
+  const sent: string[] = [];
+  let sendAttempts = 0;
+  const finalReport = "【本轮处理结果】\n状态：已完成\n已处理：长任务已完成。";
   const service = new BridgeService({
     config: {
       ...defaultConfig(tmpDir),
@@ -2276,36 +2284,42 @@ test("ends a persistently disconnected turn after twenty retries", async (t) => 
     stateStore,
     weixin: {
       async sendTyping() {},
-      async sendText() {
-        return { messageId: "text" };
+      async sendText(input: { text: string }) {
+        sendAttempts += 1;
+        if (sendAttempts === 1) {
+          throw new WeixinApiError("sendmessage failed: ret=-2", "sendmessage", -2);
+        }
+        sent.push(input.text);
+        return { messageId: `text-${sendAttempts}` };
       }
     } as never,
-    retryDelay: async () => {
-      if (calls > 20) {
-        throw new Error("retry test guard");
-      }
-    },
     runner: {
       async run() {
-        calls += 1;
-        throw new Error("stream disconnected before completion: stream closed before response.completed");
+        return { raw: "", text: finalReport };
       },
       async stop() {}
     } as never
   });
 
-  await assert.rejects(
-    service.handleMessage({
-      id: "retry-limit",
-      senderId: "alice@im.wechat",
-      contextToken: "ctx",
-      text: "finish this task",
-      raw: {}
-    }),
-    /stream disconnected before completion/
-  );
+  await service.handleMessage({
+    id: "stale-final-report",
+    senderId: "alice@im.wechat",
+    contextToken: "ctx-expired",
+    text: "完成后告诉我结果",
+    raw: {}
+  });
+  assert.equal(stateStore.snapshot.pendingDeliveries.length, 1);
 
-  assert.equal(calls, 21);
+  await service.handleMessage({
+    id: "fresh-context",
+    senderId: "alice@im.wechat",
+    contextToken: "ctx-fresh",
+    text: "/help",
+    raw: {}
+  });
+
+  assert.equal(sent[0], finalReport);
+  assert.equal(stateStore.snapshot.pendingDeliveries.length, 0);
 });
 
 test("retries a transient 502 from the active API on the same thread", async (t) => {

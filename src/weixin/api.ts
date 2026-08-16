@@ -16,14 +16,22 @@ export class WeixinApiError extends Error {
     message: string,
     public readonly endpoint: string,
     public readonly ret?: number,
-    public readonly errcode?: number
+    public readonly errcode?: number,
+    public readonly errmsg?: string
   ) {
     super(message);
     this.name = "WeixinApiError";
   }
 }
 
+/** ret=-2 on sendmessage means the request was rejected by the WeChat gateway.
+ *  It can be a stale context token OR a transient send restriction (e.g. rate
+ *  limiting / risk control). Callers should treat it as retryable with backoff. */
 export function isStaleContextError(error: unknown): boolean {
+  return error instanceof WeixinApiError && error.endpoint === "sendmessage" && error.ret === -2;
+}
+
+export function isSendRejectedError(error: unknown): boolean {
   return error instanceof WeixinApiError && error.endpoint === "sendmessage" && error.ret === -2;
 }
 
@@ -48,41 +56,11 @@ export class WeixinApiClient {
     text: string;
     contextToken?: string;
   }): Promise<{ messageId: string }> {
-    const clientId = crypto.randomUUID();
-    const maxAttempts = Math.max(1, Math.floor(this.options.sendRetryAttempts ?? 3));
-    const retryDelayMs = Math.max(0, this.options.sendRetryDelayMs ?? 250);
-    let contextToken = input.contextToken;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const body = {
-        msg: {
-          from_user_id: "",
-          to_user_id: input.toUserId,
-          client_id: clientId,
-          message_type: 2,
-          message_state: 2,
-          ...(contextToken ? { context_token: contextToken } : {}),
-          item_list: [{ type: 1, text_item: { text: input.text } }]
-        },
-        base_info: { channel_version: "0.1.0" }
-      };
-
-      try {
-        const response = await this.post("ilink/bot/sendmessage", body);
-        return { messageId: String(response.message_id ?? response.msgid ?? clientId) };
-      } catch (error) {
-        if (isStaleContextError(error) && contextToken) {
-          contextToken = undefined;
-          continue;
-        }
-        if (attempt >= maxAttempts || !isRetryableSendError(error)) {
-          throw error;
-        }
-        await delay(retryDelayMs * attempt);
-      }
-    }
-
-    throw new Error("sendmessage retry loop exited unexpectedly");
+    return this.sendMessageWithRetry({
+      toUserId: input.toUserId,
+      contextToken: input.contextToken,
+      buildItemList: () => [{ type: 1, text_item: { text: input.text } }]
+    });
   }
 
   async sendTyping(input: { toUserId: string; contextToken?: string; typing?: boolean }): Promise<void> {
@@ -139,31 +117,22 @@ export class WeixinApiClient {
     plainSize: number;
     contextToken?: string;
   }): Promise<{ messageId: string }> {
-    const clientId = crypto.randomUUID();
-    const response = await this.post("ilink/bot/sendmessage", {
-      msg: {
-        from_user_id: "",
-        to_user_id: input.toUserId,
-        client_id: clientId,
-        message_type: 2,
-        message_state: 2,
-        ...(input.contextToken ? { context_token: input.contextToken } : {}),
-        item_list: [{
-          type: 4,
-          file_item: {
-            media: {
-              encrypt_query_param: input.encryptQueryParam,
-              aes_key: input.aesKeyBase64,
-              encrypt_type: 1
-            },
-            file_name: input.fileName,
-            len: String(input.plainSize)
-          }
-        }]
-      },
-      base_info: { channel_version: "0.1.0" }
+    return this.sendMessageWithRetry({
+      toUserId: input.toUserId,
+      contextToken: input.contextToken,
+      buildItemList: () => [{
+        type: 4,
+        file_item: {
+          media: {
+            encrypt_query_param: input.encryptQueryParam,
+            aes_key: input.aesKeyBase64,
+            encrypt_type: 1
+          },
+          file_name: input.fileName,
+          len: String(input.plainSize)
+        }
+      }]
     });
-    return { messageId: String(response.message_id ?? response.msgid ?? clientId) };
   }
 
   async sendImageMessage(input: {
@@ -173,31 +142,22 @@ export class WeixinApiClient {
     cipherSize: number;
     contextToken?: string;
   }): Promise<{ messageId: string }> {
-    const clientId = crypto.randomUUID();
-    const response = await this.post("ilink/bot/sendmessage", {
-      msg: {
-        from_user_id: "",
-        to_user_id: input.toUserId,
-        client_id: clientId,
-        message_type: 2,
-        message_state: 2,
-        ...(input.contextToken ? { context_token: input.contextToken } : {}),
-        item_list: [{
-          type: 2,
-          image_item: {
-            media: {
-              encrypt_query_param: input.encryptQueryParam,
-              aes_key: input.aesKeyBase64,
-              encrypt_type: 1
-            },
-            mid_size: input.cipherSize,
-            hd_size: input.cipherSize
-          }
-        }]
-      },
-      base_info: { channel_version: "0.1.0" }
+    return this.sendMessageWithRetry({
+      toUserId: input.toUserId,
+      contextToken: input.contextToken,
+      buildItemList: () => [{
+        type: 2,
+        image_item: {
+          media: {
+            encrypt_query_param: input.encryptQueryParam,
+            aes_key: input.aesKeyBase64,
+            encrypt_type: 1
+          },
+          mid_size: input.cipherSize,
+          hd_size: input.cipherSize
+        }
+      }]
     });
-    return { messageId: String(response.message_id ?? response.msgid ?? clientId) };
   }
 
   async sendVideoMessage(input: {
@@ -207,30 +167,69 @@ export class WeixinApiClient {
     cipherSize: number;
     contextToken?: string;
   }): Promise<{ messageId: string }> {
-    const clientId = crypto.randomUUID();
-    const response = await this.post("ilink/bot/sendmessage", {
-      msg: {
-        from_user_id: "",
-        to_user_id: input.toUserId,
-        client_id: clientId,
-        message_type: 2,
-        message_state: 2,
-        ...(input.contextToken ? { context_token: input.contextToken } : {}),
-        item_list: [{
-          type: 5,
-          video_item: {
-            media: {
-              encrypt_query_param: input.encryptQueryParam,
-              aes_key: input.aesKeyBase64,
-              encrypt_type: 1
-            },
-            video_size: input.cipherSize
-          }
-        }]
-      },
-      base_info: { channel_version: "0.1.0" }
+    return this.sendMessageWithRetry({
+      toUserId: input.toUserId,
+      contextToken: input.contextToken,
+      buildItemList: () => [{
+        type: 5,
+        video_item: {
+          media: {
+            encrypt_query_param: input.encryptQueryParam,
+            aes_key: input.aesKeyBase64,
+            encrypt_type: 1
+          },
+          video_size: input.cipherSize
+        }
+      }]
     });
-    return { messageId: String(response.message_id ?? response.msgid ?? clientId) };
+  }
+
+  /** Unified sendmessage loop shared by text/image/file/video sends.
+   *  - A stale context token is dropped and the message retried without it.
+   *  - ret=-2 (rejected / prepare failed) is retried with increasing backoff
+   *    because the WeChat gateway often applies transient send restrictions.
+   *  - Other transient network errors are retried with backoff as well. */
+  private async sendMessageWithRetry(input: {
+    toUserId: string;
+    contextToken?: string;
+    buildItemList: () => unknown[];
+  }): Promise<{ messageId: string }> {
+    const clientId = crypto.randomUUID();
+    const maxAttempts = Math.max(1, Math.floor(this.options.sendRetryAttempts ?? 3));
+    const retryDelayMs = Math.max(0, this.options.sendRetryDelayMs ?? 250);
+    let contextToken = input.contextToken;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const body = {
+        msg: {
+          from_user_id: "",
+          to_user_id: input.toUserId,
+          client_id: clientId,
+          message_type: 2,
+          message_state: 2,
+          ...(contextToken ? { context_token: contextToken } : {}),
+          item_list: input.buildItemList()
+        },
+        base_info: { channel_version: "0.1.0" }
+      };
+
+      try {
+        const response = await this.post("ilink/bot/sendmessage", body);
+        return { messageId: String(response.message_id ?? response.msgid ?? clientId) };
+      } catch (error) {
+        if (isStaleContextError(error) && contextToken) {
+          contextToken = undefined;
+          continue;
+        }
+        if (attempt >= maxAttempts || (!isRetryableSendError(error) && !isSendRejectedError(error))) {
+          throw error;
+        }
+        const backoffMs = retryDelayMs * attempt * (isSendRejectedError(error) ? 4 : 1);
+        await delay(backoffMs);
+      }
+    }
+
+    throw new Error("sendmessage retry loop exited unexpectedly");
   }
 
   private async post(endpoint: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
@@ -257,12 +256,14 @@ export class WeixinApiClient {
     const parsed = text ? JSON.parse(text) as Record<string, unknown> : {};
     const ret = typeof parsed.ret === "number" ? parsed.ret : 0;
     const errcode = typeof parsed.errcode === "number" ? parsed.errcode : undefined;
+    const errmsg = typeof parsed.errmsg === "string" ? parsed.errmsg : undefined;
     if (ret !== 0) {
       throw new WeixinApiError(
-        `${shortEndpoint(endpoint)} failed: ret=${ret} errcode=${errcode ?? "undefined"} errmsg=${String(parsed.errmsg ?? "")}`,
+        `${shortEndpoint(endpoint)} failed: ret=${ret} errcode=${errcode ?? "undefined"} errmsg=${errmsg ?? ""}`,
         shortEndpoint(endpoint),
         ret,
-        errcode
+        errcode,
+        errmsg
       );
     }
     return parsed;
