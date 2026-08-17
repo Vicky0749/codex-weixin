@@ -567,9 +567,10 @@ test("lists API profiles and includes API commands in help and status", async (t
   });
 
   await send("api-list", "/api");
-  assert.match(replies.at(-1) ?? "", /1\. 【当前使用】\n名称：公司api\nURL：https:\/\/one\.example\/v1\nAPI 密钥后四位：1234/);
-  assert.match(replies.at(-1) ?? "", /2\. 【已保存】\n名称：备用API\nURL：https:\/\/two\.example\/v1\nAPI 密钥后四位：5678/);
-  assert.doesNotMatch(replies.at(-1) ?? "", /model-one|model-two/);
+  assert.match(replies.at(-1) ?? "", /1\. 【当前使用】\n名称：公司api\nURL：https:\/\/one\.example\/v1\n模型：model-one\nAPI 密钥后四位：1234/);
+  assert.match(replies.at(-1) ?? "", /2\. 【已保存】\n名称：备用API\nURL：https:\/\/two\.example\/v1\n模型：model-two\nAPI 密钥后四位：5678/);
+  assert.match(replies.at(-1) ?? "", /模型：model-one/);
+  assert.match(replies.at(-1) ?? "", /模型：model-two/);
 
   await send("status", "/status");
   assert.match(replies.at(-1) ?? "", /api: 公司api/);
@@ -582,6 +583,62 @@ test("lists API profiles and includes API commands in help and status", async (t
   assert.match(replies.at(-1) ?? "", /\/2/);
   await send("unknown", "/does-not-exist");
   assert.match(replies.at(-1) ?? "", /\/help/);
+});
+
+test("reveals an API key only to the locally designated key owner", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-api-key-owner-command-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
+  stateStore.setApiKeyOwnerSenderId("owner@im.wechat");
+  const replies: Array<{ senderId: string; text: string }> = [];
+  const profile = {
+    id: "primary",
+    name: "Private API",
+    baseUrl: "https://one.example/v1",
+    model: "model-one",
+    effort: "medium",
+    hasApiKey: true,
+    active: true,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z"
+  };
+  const service = new BridgeService({
+    config: { ...defaultConfig(tmpDir), allowedSenderIds: ["owner@im.wechat", "guest@im.wechat"] },
+    stateStore,
+    weixin: {
+      async sendTyping() {},
+      async sendText(input: { toUserId: string; text: string }) {
+        replies.push({ senderId: input.toUserId, text: input.text });
+        return { messageId: "text-message" };
+      }
+    } as never,
+    apiProfiles: {
+      list: () => [profile],
+      listForDisplay: async () => [{ ...profile, apiKeyLastFour: "7890" }],
+      getActive: () => profile,
+      async readSecret() { return "sk-private-api-key-7890"; },
+      async setDefaults() { return profile; },
+      async createVerified() { throw new Error("not used"); },
+      async test() { return { ok: true as const, latencyMs: 1 }; },
+      async activate() { return profile; }
+    },
+    runner: { async run() { return { raw: "", text: "unexpected" }; }, async stop() {} } as never
+  });
+  const send = (id: string, senderId: string, text: string) => service.handleMessage({
+    id,
+    senderId,
+    contextToken: "ctx",
+    text,
+    raw: {}
+  });
+
+  await send("guest-key", "guest@im.wechat", "/api key 1");
+  assert.match(replies.at(-1)?.text ?? "", /仅密钥管理员本人可以查看/);
+  assert.doesNotMatch(replies.map((reply) => reply.text).join("\n"), /sk-private-api-key-7890/);
+
+  await send("owner-key", "owner@im.wechat", "/api key 1");
+  assert.equal(replies.at(-1)?.senderId, "owner@im.wechat");
+  assert.match(replies.at(-1)?.text ?? "", /sk-private-api-key-7890/);
 });
 
 test("runs persistent goal mode through English and Chinese goal commands", async (t) => {

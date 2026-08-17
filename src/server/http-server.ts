@@ -331,6 +331,12 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     sendJson(response, 200, { ok: true });
     return;
   }
+  if (method === "POST" && accessMatch?.action === "key-owner") {
+    sendJson(response, 200, {
+      account: context.accountManager.setApiKeyOwner(accessMatch.accountId, accessMatch.senderId)
+    });
+    return;
+  }
 
   if (method === "POST" && url.pathname === "/api/sessions") {
     const body = bodySchema.parse(await readJsonBody(request));
@@ -654,7 +660,7 @@ function errorStatus(error: unknown): number {
   if (/not found/i.test(message)) return 404;
   if (/already in progress|no newer/i.test(message)) return 409;
   if (/unable to verify|timed out/i.test(message)) return 503;
-  return /required|invalid|allowed|empty|too large|too many|exceed/i.test(message) ? 400 : 500;
+  return /required|invalid|allowed|authorized|empty|too large|too many|exceed/i.test(message) ? 400 : 500;
 }
 
 function requireApiProfileManager(context: HandlerContext): ApiProfileManager {

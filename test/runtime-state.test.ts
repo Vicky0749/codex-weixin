@@ -225,3 +225,19 @@ test("keeps repeated pending deliveries in their original order", (t) => {
     ["同一段最终结果", "同一段最终结果"]
   );
 });
+
+test("persists the single private API-key owner for an account", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-api-key-owner-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = resolveStatePaths(root);
+  const store = new RuntimeStateStore(paths);
+
+  assert.equal(store.getApiKeyOwnerSenderId(), undefined);
+  store.setApiKeyOwnerSenderId("owner@im.wechat");
+  assert.equal(store.getApiKeyOwnerSenderId(), "owner@im.wechat");
+
+  const reloaded = new RuntimeStateStore(paths);
+  assert.equal(reloaded.getApiKeyOwnerSenderId(), "owner@im.wechat");
+  reloaded.setApiKeyOwnerSenderId();
+  assert.equal(reloaded.getApiKeyOwnerSenderId(), undefined);
+});

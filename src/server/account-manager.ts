@@ -40,6 +40,7 @@ export type AccountSummary = PublicWeixinAccount & {
   status: AccountRunStatus;
   error?: string;
   pairedSenderIds: string[];
+  apiKeyOwnerSenderId?: string;
   lastActiveSenderId?: string;
   sessionCount: number;
 };
@@ -641,13 +642,28 @@ export class AccountManager {
   }
 
   removeSender(accountId: string, senderId: string): void {
-    const entry = this.entries.get(loadAccount(this.options.paths, accountId).accountId);
+    const account = loadAccount(this.options.paths, accountId);
+    const entry = this.entries.get(account.accountId);
     if (entry?.service) {
       entry.service.removeSender(senderId);
-      return;
+    } else {
+      const store = this.storeFor(account.accountId);
+      store.setPairedSenderIds(store.listPairedSenderIds().filter((candidate) => candidate !== senderId));
     }
-    const store = this.storeFor(accountId);
-    store.setPairedSenderIds(store.listPairedSenderIds().filter((candidate) => candidate !== senderId));
+    const store = this.storeFor(account.accountId);
+    if (store.getApiKeyOwnerSenderId() === senderId) {
+      store.setApiKeyOwnerSenderId();
+    }
+  }
+
+  setApiKeyOwner(accountId: string, senderId: string): AccountSummary {
+    const account = loadAccount(this.options.paths, accountId);
+    const store = this.storeFor(account.accountId);
+    if (!store.listPairedSenderIds().includes(senderId)) {
+      throw new Error("API key owner must be an authorized sender");
+    }
+    store.setApiKeyOwnerSenderId(senderId);
+    return this.summary(account);
   }
 
   private storeFor(accountId: string): RuntimeStateStore {
@@ -781,6 +797,7 @@ export class AccountManager {
       status: entry?.status ?? "stopped",
       ...(entry?.error ? { error: entry.error } : {}),
       pairedSenderIds: store.listPairedSenderIds(),
+      ...(store.getApiKeyOwnerSenderId() ? { apiKeyOwnerSenderId: store.getApiKeyOwnerSenderId() } : {}),
       lastActiveSenderId: store.getLastActiveSenderId(),
       sessionCount: store.listSessions().length
     };

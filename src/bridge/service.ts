@@ -31,6 +31,7 @@ import type { PromptBufferItem } from "./prompt-buffer.js";
 export type ApiProfileCommandService = {
   list: () => ApiProfileSummary[];
   listForDisplay: () => Promise<ApiProfileDisplaySummary[]>;
+  readSecret?: (id: string) => Promise<string>;
   getActive: () => ApiProfileSummary | undefined;
   getActiveTaskCount?: () => number;
   validateDefaults?: (id: string, model: string, effort: string) => void;
@@ -323,6 +324,9 @@ export class BridgeService {
       case "test":
         await this.testApiProfile(senderId, rest.join(" ").trim());
         return;
+      case "key":
+        await this.revealApiProfileKey(senderId, rest.join(" ").trim());
+        return;
       case "set":
         await this.setApiProfileDefaults(senderId, rest);
         return;
@@ -407,6 +411,7 @@ export class BridgeService {
         `${index + 1}. ${profile.active ? "【当前使用】" : "【已保存】"}`,
         `名称：${singleLine(profile.name)}`,
         `URL：${profile.baseUrl}`,
+        `模型：${singleLine(profile.model)}`,
         `API 密钥后四位：${profile.apiKeyLastFour ?? "无法读取"}`,
         ""
       );
@@ -416,6 +421,7 @@ export class BridgeService {
       "强制切换确认：检测到执行中任务时，发送 /1 中断并切换，/2 取消（兼容 /api confirm、/api cancel）",
       "测试：/api test 2",
       "添加：/api add <名称> <Base URL> [模型ID]",
+      "查看密钥：/api key <编号或名称>（仅密钥管理员本人）",
       "取消密钥输入：/api cancel"
     );
     for (const chunk of chunkText(lines.join("\n"))) {
@@ -1350,6 +1356,43 @@ export class BridgeService {
     }
   }
 
+  private async revealApiProfileKey(senderId: string, selector: string): Promise<void> {
+    const apiProfiles = this.options.apiProfiles;
+    if (!apiProfiles) return;
+    const ownerSenderId = this.options.stateStore.getApiKeyOwnerSenderId();
+    if (!ownerSenderId) {
+      await this.reply(senderId, "尚未设置密钥管理员。请在本机 codex-weixin 管理台的微信账号页面指定管理员后重试。");
+      return;
+    }
+    if (ownerSenderId !== senderId) {
+      await this.reply(senderId, "仅密钥管理员本人可以查看 API 密钥。");
+      return;
+    }
+    if (!selector) {
+      await this.reply(senderId, "用法：/api key <编号或名称>\n示例：/api key 2");
+      return;
+    }
+    const profile = selectApiProfile(apiProfiles.list(), selector);
+    if (!profile) {
+      await this.reply(senderId, "没有找到该 API。发送 /api 查看编号和名称。");
+      return;
+    }
+    if (!apiProfiles.readSecret) {
+      await this.reply(senderId, "API 密钥读取功能当前不可用，请重启 codex-weixin 后重试。");
+      return;
+    }
+    try {
+      const apiKey = await apiProfiles.readSecret(profile.id);
+      await this.reply(senderId, [
+        `API“${singleLine(profile.name)}”密钥：`,
+        apiKey,
+        "此内容仅发送给密钥管理员；复制后请在微信中删除该消息。"
+      ].join("\n"));
+    } catch {
+      await this.reply(senderId, "无法读取该 API 密钥。请在本机管理台检查配置后重试。");
+    }
+  }
+
   private async reply(senderId: string, text: string, deferOnFailure = false): Promise<boolean> {
     const contextToken = this.options.stateStore.getContextToken(senderId);
     try {
@@ -1447,6 +1490,7 @@ function helpText(): string {
     "/2 - API 切换确认时，取消切换并保留当前任务",
     "/api confirm - 确认结束执行中任务并切换 API（兼容 /1）",
     "/api test <编号或名称> - 只测试 API，不切换",
+    "/api key <编号或名称> - 仅密钥管理员本人查看 API 密钥",
     "/api set <编号或名称> <模型ID> <推理强度> - 设置 API 默认值",
     "/api add <名称> <Base URL> [模型ID] - 安全添加 API",
     "/api cancel - 取消等待输入 API Key 或待确认的 API 切换（兼容 /2）",
