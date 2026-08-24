@@ -200,6 +200,20 @@ test("recovers a completed turn when the app-server misses turn/completed", { ti
   assert.equal(result.text, "reply:missing-completion");
 });
 
+test("hybrid runner probes for a missing completion event without imposing a turn deadline", { timeout: 3_000 }, async (t) => {
+  const runner = new HybridCodexRunner({
+    backend: "app-server",
+    codexBin: path.join(fixturesDir, "fake-codex-app-server.mjs"),
+    turnStatusProbeIntervalMs: 20
+  });
+  t.after(() => runner.close());
+
+  const result = await runner.run({ prompt: "missing-completion", cwd: "/tmp/project" });
+
+  assert.equal(result.threadId, "thread-new");
+  assert.equal(result.text, "reply:missing-completion");
+});
+
 test("keeps a turn alive when a stall probe confirms it is still running", { timeout: 1_000 }, async (t) => {
   const runner = new AppServerCodexRunner({
     codexBin: path.join(fixturesDir, "fake-codex-app-server.mjs"),

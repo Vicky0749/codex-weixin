@@ -66,6 +66,10 @@ export class ApiProfileManager {
     }));
   }
 
+  readSecret(id: string): Promise<string> {
+    return this.options.store.readSecret(id);
+  }
+
   getActive(): ApiProfileSummary | undefined {
     return this.options.store.getActive();
   }

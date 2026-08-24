@@ -27,10 +27,12 @@ import { WeixinApiClient, isStaleContextError, type FetchLike } from "../weixin/
 import { downloadInboundAttachments, InboundMediaTooLargeError, sendLocalMediaFile } from "../weixin/media.js";
 import type { NormalizedWeixinMessage } from "../weixin/messages.js";
 import type { PromptBufferItem } from "./prompt-buffer.js";
+import { formatCompletionSubject, type TaskCompletionNotice } from "../notifications/task-completion-email.js";
 
 export type ApiProfileCommandService = {
   list: () => ApiProfileSummary[];
   listForDisplay: () => Promise<ApiProfileDisplaySummary[]>;
+  readSecret?: (id: string) => Promise<string>;
   getActive: () => ApiProfileSummary | undefined;
   getActiveTaskCount?: () => number;
   validateDefaults?: (id: string, model: string, effort: string) => void;
@@ -63,6 +65,8 @@ export type BridgeServiceOptions = {
   deferTask?: (task: () => Promise<void>) => void;
   scheduleGoalContinuation?: (task: () => Promise<void>, delayMs: number) => void;
   retryDelay?: (retryAttempt: number) => Promise<void> | void;
+  accountIdentity?: { index: number; displayName?: string };
+  taskCompletionNotifier?: (notice: TaskCompletionNotice) => Promise<void> | void;
 };
 
 type ActiveTurnControl = {
@@ -323,6 +327,9 @@ export class BridgeService {
       case "test":
         await this.testApiProfile(senderId, rest.join(" ").trim());
         return;
+      case "key":
+        await this.revealApiProfileKey(senderId, rest.join(" ").trim());
+        return;
       case "set":
         await this.setApiProfileDefaults(senderId, rest);
         return;
@@ -407,6 +414,7 @@ export class BridgeService {
         `${index + 1}. ${profile.active ? "【当前使用】" : "【已保存】"}`,
         `名称：${singleLine(profile.name)}`,
         `URL：${profile.baseUrl}`,
+        `模型：${singleLine(profile.model)}`,
         `API 密钥后四位：${profile.apiKeyLastFour ?? "无法读取"}`,
         ""
       );
@@ -416,6 +424,7 @@ export class BridgeService {
       "强制切换确认：检测到执行中任务时，发送 /1 中断并切换，/2 取消（兼容 /api confirm、/api cancel）",
       "测试：/api test 2",
       "添加：/api add <名称> <Base URL> [模型ID]",
+      "查看密钥：/api key <编号或名称>（仅密钥管理员本人）",
       "取消密钥输入：/api cancel"
     );
     for (const chunk of chunkText(lines.join("\n"))) {
@@ -986,10 +995,11 @@ export class BridgeService {
         }
         const parsed = parseActionBlocks(result.text);
         const remaining = chunkText(parsed.visibleText);
+        let deliveredFinalReply = false;
         if (remaining.length) {
           for (const chunk of remaining) {
             if (control.cancelled) return;
-            await this.reply(message.senderId, chunk, true);
+            deliveredFinalReply = (await this.reply(message.senderId, chunk, true)) || deliveredFinalReply;
           }
         }
         const actionsByPath = new Map<string, SendAction>();
@@ -1000,7 +1010,18 @@ export class BridgeService {
           if (control.cancelled) return;
           await this.sendLocalMedia(message.senderId, action);
         }
+        const activeGoal = this.options.stateStore.getActiveSession(message.senderId);
+        const goalTaskName = isGoalActive(activeGoal) ? activeGoal.goal : undefined;
         this.reconcileGoalAfterTurn(message.senderId, result, isGoalContinuation);
+        const goalCompleted = Boolean(goalTaskName)
+          && this.options.stateStore.getActiveSession(message.senderId)?.goalStatus === "completed";
+        if (deliveredFinalReply && (!goalTaskName || goalCompleted)) {
+          await this.notifyTaskCompletion({
+            taskName: goalTaskName || promptPreview || text || "Codex 任务",
+            finalSummary: parsed.visibleText.replace(/\s+/g, " ").trim().slice(0, 300),
+            attachmentCount: actionsByPath.size
+          });
+        }
       });
     } catch (error) {
       if (!control.cancelled) throw error;
@@ -1249,6 +1270,32 @@ export class BridgeService {
     }
   }
 
+  private async notifyTaskCompletion(input: {
+    taskName: string;
+    finalSummary: string;
+    attachmentCount: number;
+  }): Promise<void> {
+    const identity = this.options.accountIdentity;
+    const notify = this.options.taskCompletionNotifier;
+    if (!identity || !notify) return;
+    const taskName = singleLine(input.taskName) || "Codex 任务";
+    const notice: TaskCompletionNotice = {
+      subject: formatCompletionSubject(identity.index, taskName),
+      taskName,
+      accountIndex: identity.index,
+      ...(identity.displayName ? { accountDisplayName: identity.displayName } : {}),
+      finalSummary: input.finalSummary || "(无文本回复)",
+      attachmentCount: input.attachmentCount,
+      completedAt: new Date().toISOString()
+    };
+    try {
+      await notify(notice);
+      console.log(`[codex-weixin] completion email sent: ${notice.subject}`);
+    } catch (error) {
+      console.warn(`[codex-weixin] completion email failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private async sendLocalMedia(senderId: string, action: { type: "image" | "file" | "video"; path: string }): Promise<void> {
     try {
       await sendLocalMediaFile({
@@ -1350,6 +1397,43 @@ export class BridgeService {
     }
   }
 
+  private async revealApiProfileKey(senderId: string, selector: string): Promise<void> {
+    const apiProfiles = this.options.apiProfiles;
+    if (!apiProfiles) return;
+    const ownerSenderId = this.options.stateStore.getApiKeyOwnerSenderId();
+    if (!ownerSenderId) {
+      await this.reply(senderId, "尚未设置密钥管理员。请在本机 codex-weixin 管理台的微信账号页面指定管理员后重试。");
+      return;
+    }
+    if (ownerSenderId !== senderId) {
+      await this.reply(senderId, "仅密钥管理员本人可以查看 API 密钥。");
+      return;
+    }
+    if (!selector) {
+      await this.reply(senderId, "用法：/api key <编号或名称>\n示例：/api key 2");
+      return;
+    }
+    const profile = selectApiProfile(apiProfiles.list(), selector);
+    if (!profile) {
+      await this.reply(senderId, "没有找到该 API。发送 /api 查看编号和名称。");
+      return;
+    }
+    if (!apiProfiles.readSecret) {
+      await this.reply(senderId, "API 密钥读取功能当前不可用，请重启 codex-weixin 后重试。");
+      return;
+    }
+    try {
+      const apiKey = await apiProfiles.readSecret(profile.id);
+      await this.reply(senderId, [
+        `API“${singleLine(profile.name)}”密钥：`,
+        apiKey,
+        "此内容仅发送给密钥管理员；复制后请在微信中删除该消息。"
+      ].join("\n"));
+    } catch {
+      await this.reply(senderId, "无法读取该 API 密钥。请在本机管理台检查配置后重试。");
+    }
+  }
+
   private async reply(senderId: string, text: string, deferOnFailure = false): Promise<boolean> {
     const contextToken = this.options.stateStore.getContextToken(senderId);
     try {
@@ -1439,17 +1523,21 @@ function parseCommand(text: string): { name: string; arg: string } | undefined {
 function helpText(): string {
   return [
     "codex-weixin 指令：",
+    "",
     "/help - 查看全部指令和用法",
     "/status - 查看当前 API、模型、推理强度和会话状态",
+    "",
     "/api - 查看已保存 API 和当前使用项",
     "/api <编号或名称> - 测试并切换 API",
     "/1 - API 切换确认时，中断执行中任务并继续切换",
     "/2 - API 切换确认时，取消切换并保留当前任务",
     "/api confirm - 确认结束执行中任务并切换 API（兼容 /1）",
     "/api test <编号或名称> - 只测试 API，不切换",
+    "/api key <编号或名称> - 仅密钥管理员本人查看 API 密钥",
     "/api set <编号或名称> <模型ID> <推理强度> - 设置 API 默认值",
     "/api add <名称> <Base URL> [模型ID] - 安全添加 API",
     "/api cancel - 取消等待输入 API Key 或待确认的 API 切换（兼容 /2）",
+    "",
     "/bind <绝对路径> - 绑定工作目录",
     "/new - 创建新的 Codex 会话",
     "/resume [R编号] - 查看或切换历史会话",
@@ -1458,10 +1546,11 @@ function helpText(): string {
     "/stream [on|off|default] - 查看或切换流式进度",
     "/goal [目标|pause|resume|clear] - 开启、查看、暂停、恢复或清除当前会话目标",
     "/目标 [目标|暂停|继续|清除] - /goal 的中文别名；/goaloff、/目标解除可直接关闭目标",
+    "",
     "/prompt start - 开始缓存多条消息",
     "/prompt done - 提交已缓存消息",
     "/stop - 立即中止当前 Codex 任务"
-  ].join("\n");
+  ].join("\r\n");
 }
 
 function selectApiProfile(profiles: ApiProfileSummary[], selector: string): ApiProfileSummary | undefined {

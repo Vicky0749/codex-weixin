@@ -13,6 +13,7 @@ export type StatePaths = {
   retainedAccountsPath: string;
   configPath: string;
   apiProfilesPath: string;
+  taskCompletionEmailPath: string;
   codexHomeDir: string;
   statePath: string;
   inboundDir: string;
@@ -27,6 +28,7 @@ export function resolveStatePaths(root = defaultStateDir()): StatePaths {
     retainedAccountsPath: path.join(root, "retained-accounts.json"),
     configPath: path.join(root, "config.json"),
     apiProfilesPath: path.join(root, "api-profiles.json"),
+    taskCompletionEmailPath: path.join(root, "task-completion-email.json"),
     codexHomeDir: path.join(root, "codex-home"),
     statePath: path.join(root, "state.json"),
     inboundDir: path.join(root, "inbound"),

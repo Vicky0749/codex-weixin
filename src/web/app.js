@@ -426,10 +426,26 @@ function renderAccounts() {
 function renderAuthorizationState(account, pendingSender) {
   const accountId = escapeAttr(account.accountId);
   if (account.pairedSenderIds.length) {
-    return `<div class="authorization-state is-authorized" aria-label="授权状态：已授权">
-      <span class="authorization-icon"><i data-lucide="shield-check"></i></span>
-      <div class="authorization-copy"><strong>已授权</strong><span>可以从微信控制 Codex</span></div>
-      <button class="button button-secondary authorization-action" type="button" data-account-action="revoke-all" data-account-id="${accountId}"><i data-lucide="shield-x"></i><span>撤销授权</span></button>
+    const ownerSenderId = account.apiKeyOwnerSenderId || "";
+    const senders = account.pairedSenderIds.map((senderId) => {
+      const isOwner = senderId === ownerSenderId;
+      return `<li class="authorization-sender">
+        <code title="${escapeAttr(senderId)}">${escapeHtml(senderId)}</code>
+        ${isOwner
+          ? `<span class="api-key-owner" title="该联系人可在微信中使用 /api key 查看 API 密钥"><i data-lucide="key-round"></i>密钥管理员</span>`
+          : `<button class="button button-secondary key-owner-action" type="button" data-account-action="set-key-owner" data-account-id="${accountId}" data-sender-id="${escapeAttr(senderId)}" title="设为密钥管理员"><i data-lucide="key-round"></i><span>设为密钥管理员</span></button>`}
+      </li>`;
+    }).join("");
+    return `<div class="authorization-panel">
+      <div class="authorization-state is-authorized" aria-label="授权状态：已授权">
+        <span class="authorization-icon"><i data-lucide="shield-check"></i></span>
+        <div class="authorization-copy"><strong>已授权</strong><span>可以从微信控制 Codex</span></div>
+        <button class="button button-secondary authorization-action" type="button" data-account-action="revoke-all" data-account-id="${accountId}"><i data-lucide="shield-x"></i><span>撤销授权</span></button>
+      </div>
+      <div class="authorization-senders">
+        <div class="authorization-senders-heading"><strong>密钥管理员</strong><span>${ownerSenderId ? "已设置" : "未设置"}</span></div>
+        <ul>${senders}</ul>
+      </div>
     </div>`;
   }
   if (pendingSender) {
@@ -823,6 +839,11 @@ async function handleAccountAction(event) {
     if (action === "start" || action === "stop") await api(`/api/accounts/${encodeURIComponent(accountId)}/${action}`, { method: "POST" });
     if (action === "allow") {
       await api(`/api/accounts/${encodeURIComponent(accountId)}/senders/${encodeURIComponent(button.dataset.senderId)}/allow`, { method: "POST" });
+    }
+    if (action === "set-key-owner") {
+      const senderId = button.dataset.senderId;
+      if (!window.confirm(`将 ${senderId} 设为密钥管理员？该联系人可在微信中执行 /api key 查看已保存的 API 密钥。`)) return;
+      await api(`/api/accounts/${encodeURIComponent(accountId)}/senders/${encodeURIComponent(senderId)}/key-owner`, { method: "POST" });
     }
     if (action === "revoke-all" && account) {
       if (!window.confirm("撤销此微信账号的全部控制授权？撤销后需要重新允许才能继续使用。")) return;

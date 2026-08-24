@@ -102,3 +102,17 @@ test("classifies transient provider failures as recoverable", () => {
   assert.equal(isRecoverableMessageHandlingError(new Error("401 Unauthorized")), false);
   assert.equal(isRecoverableMessageHandlingError(new Error("invalid request schema")), false);
 });
+
+test("classifies common network connection failures as recoverable", () => {
+  for (const message of [
+    "connect ETIMEDOUT 10.0.0.1:443",
+    "getaddrinfo EAI_AGAIN api.example",
+    "connect ENETUNREACH 10.0.0.1:443",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "ECONNABORTED: connection timed out",
+    "network failure while reading response"
+  ]) {
+    assert.equal(isUnclassifiedMessageHandlingError(new Error(message)), true, message);
+    assert.equal(isRecoverableMessageHandlingError(new Error(message)), true, message);
+  }
+});

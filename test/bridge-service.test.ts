@@ -14,6 +14,61 @@ import { WeixinApiError } from "../src/weixin/api.js";
 import { encryptAesEcb } from "../src/weixin/media.js";
 import { normalizeWeixinMessage } from "../src/weixin/messages.js";
 
+test("sends a numbered completion notification after the final WeChat reply", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-completion-notice-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
+  const order: string[] = [];
+  const notices: Array<{ subject: string; taskName: string; accountIndex: number; accountDisplayName?: string }> = [];
+  const service = new BridgeService({
+    config: { ...defaultConfig(tmpDir), allowedSenderIds: ["alice@im.wechat"] },
+    stateStore,
+    accountIdentity: { index: 3, displayName: "heeo" },
+    taskCompletionNotifier: async (notice) => {
+      order.push(`mail:${notice.subject}`);
+      notices.push(notice);
+    },
+    weixin: {
+      async sendTyping() {},
+      async sendText(input: { text: string }) {
+        order.push(`reply:${input.text}`);
+        return { messageId: "final-reply" };
+      }
+    } as never,
+    runner: {
+      async run() {
+        return {
+          raw: "",
+          threadId: "thread-completion-notice",
+          text: "【本轮处理结果】\n状态：已完成\n已处理：费用明细已整理。"
+        };
+      },
+      async stop() {}
+    } as never
+  });
+
+  await service.handleMessage({
+    id: "completion-notice",
+    senderId: "alice@im.wechat",
+    contextToken: "ctx",
+    text: "整理三季度费用明细",
+    raw: {}
+  });
+
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].subject, "3-已完成：整理三季度费用明细");
+  assert.equal(notices[0].taskName, "整理三季度费用明细");
+  assert.equal(notices[0].accountIndex, 3);
+  assert.equal(notices[0].accountDisplayName, "heeo");
+  assert.equal(notices[0].attachmentCount, 0);
+  assert.match(notices[0].finalSummary, /费用明细已整理/);
+  assert.match(notices[0].completedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(order, [
+    "reply:【本轮处理结果】\n状态：已完成\n已处理：费用明细已整理。",
+    "mail:3-已完成：整理三季度费用明细"
+  ]);
+});
+
 test("stops a task before the runner starts and sends no residual reply", async (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-stop-before-run-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
@@ -567,9 +622,10 @@ test("lists API profiles and includes API commands in help and status", async (t
   });
 
   await send("api-list", "/api");
-  assert.match(replies.at(-1) ?? "", /1\. 【当前使用】\n名称：公司api\nURL：https:\/\/one\.example\/v1\nAPI 密钥后四位：1234/);
-  assert.match(replies.at(-1) ?? "", /2\. 【已保存】\n名称：备用API\nURL：https:\/\/two\.example\/v1\nAPI 密钥后四位：5678/);
-  assert.doesNotMatch(replies.at(-1) ?? "", /model-one|model-two/);
+  assert.match(replies.at(-1) ?? "", /1\. 【当前使用】\n名称：公司api\nURL：https:\/\/one\.example\/v1\n模型：model-one\nAPI 密钥后四位：1234/);
+  assert.match(replies.at(-1) ?? "", /2\. 【已保存】\n名称：备用API\nURL：https:\/\/two\.example\/v1\n模型：model-two\nAPI 密钥后四位：5678/);
+  assert.match(replies.at(-1) ?? "", /模型：model-one/);
+  assert.match(replies.at(-1) ?? "", /模型：model-two/);
 
   await send("status", "/status");
   assert.match(replies.at(-1) ?? "", /api: 公司api/);
@@ -580,8 +636,67 @@ test("lists API profiles and includes API commands in help and status", async (t
   assert.match(replies.at(-1) ?? "", /\/api add/);
   assert.match(replies.at(-1) ?? "", /\/1/);
   assert.match(replies.at(-1) ?? "", /\/2/);
+  assert.match(replies.at(-1) ?? "", /\/help[^\r\n]*\r?\n\/status/);
+  assert.match(replies.at(-1) ?? "", /\/status[^\r\n]*\r?\n\r?\n\/api/);
+  assert.doesNotMatch(replies.at(-1) ?? "", /\/help[^\r\n]* \/status|\/status[^\r\n]* \/api/);
   await send("unknown", "/does-not-exist");
   assert.match(replies.at(-1) ?? "", /\/help/);
+});
+
+test("reveals an API key only to the locally designated key owner", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-api-key-owner-command-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
+  stateStore.setApiKeyOwnerSenderId("owner@im.wechat");
+  const replies: Array<{ senderId: string; text: string }> = [];
+  const profile = {
+    id: "primary",
+    name: "Private API",
+    baseUrl: "https://one.example/v1",
+    model: "model-one",
+    effort: "medium",
+    hasApiKey: true,
+    active: true,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z"
+  };
+  const service = new BridgeService({
+    config: { ...defaultConfig(tmpDir), allowedSenderIds: ["owner@im.wechat", "guest@im.wechat"] },
+    stateStore,
+    weixin: {
+      async sendTyping() {},
+      async sendText(input: { toUserId: string; text: string }) {
+        replies.push({ senderId: input.toUserId, text: input.text });
+        return { messageId: "text-message" };
+      }
+    } as never,
+    apiProfiles: {
+      list: () => [profile],
+      listForDisplay: async () => [{ ...profile, apiKeyLastFour: "7890" }],
+      getActive: () => profile,
+      async readSecret() { return "sk-private-api-key-7890"; },
+      async setDefaults() { return profile; },
+      async createVerified() { throw new Error("not used"); },
+      async test() { return { ok: true as const, latencyMs: 1 }; },
+      async activate() { return profile; }
+    },
+    runner: { async run() { return { raw: "", text: "unexpected" }; }, async stop() {} } as never
+  });
+  const send = (id: string, senderId: string, text: string) => service.handleMessage({
+    id,
+    senderId,
+    contextToken: "ctx",
+    text,
+    raw: {}
+  });
+
+  await send("guest-key", "guest@im.wechat", "/api key 1");
+  assert.match(replies.at(-1)?.text ?? "", /仅密钥管理员本人可以查看/);
+  assert.doesNotMatch(replies.map((reply) => reply.text).join("\n"), /sk-private-api-key-7890/);
+
+  await send("owner-key", "owner@im.wechat", "/api key 1");
+  assert.equal(replies.at(-1)?.senderId, "owner@im.wechat");
+  assert.match(replies.at(-1)?.text ?? "", /sk-private-api-key-7890/);
 });
 
 test("runs persistent goal mode through English and Chinese goal commands", async (t) => {
@@ -693,9 +808,14 @@ test("continues an active goal at an idle boundary until evidence marks it compl
   const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
   const scheduled: Array<() => Promise<void>> = [];
   const runs: Array<Record<string, unknown>> = [];
+  const notices: Array<{ taskName: string; subject: string }> = [];
   const service = new BridgeService({
     config: { ...defaultConfig(tmpDir), allowedSenderIds: ["alice@im.wechat"] },
     stateStore,
+    accountIdentity: { index: 4, displayName: "Serendipity" },
+    taskCompletionNotifier: async (notice) => {
+      notices.push(notice);
+    },
     scheduleGoalContinuation(task) {
       scheduled.push(task);
     },
@@ -734,12 +854,16 @@ test("continues an active goal at an idle boundary until evidence marks it compl
   assert.equal(runs.length, 1);
   assert.equal(scheduled.length, 1);
   assert.equal(stateStore.getActiveSession("alice@im.wechat")?.goalStatus, "active");
+  assert.equal(notices.length, 0);
 
   await scheduled.shift()?.();
   assert.equal(runs.length, 2);
   assert.match(String(runs[1]?.prompt), /继续推进当前目标/);
   assert.equal(stateStore.getActiveSession("alice@im.wechat")?.goalStatus, "completed");
   assert.equal(scheduled.length, 0);
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0]?.taskName, stateStore.getActiveSession("alice@im.wechat")?.goal);
+  assert.match(notices[0]?.subject ?? "", /^4-/);
 });
 
 test("pauses a queued goal continuation when the user sends stop", async (t) => {
@@ -2202,7 +2326,7 @@ test("automatically resumes a recoverable failed turn up to ten times", async (t
           throw new Error("stream disconnected before completion: stream closed before response.completed");
         }
         if (calls === 2) {
-          throw new Error("stream disconnected before completion: stream closed before response.completed");
+          throw new Error("connect ETIMEDOUT api.example:443");
         }
         return { raw: "", text: "恢复完成", threadId: input.threadId };
       },
