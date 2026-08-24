@@ -27,6 +27,7 @@ import { WeixinApiClient, isStaleContextError, type FetchLike } from "../weixin/
 import { downloadInboundAttachments, InboundMediaTooLargeError, sendLocalMediaFile } from "../weixin/media.js";
 import type { NormalizedWeixinMessage } from "../weixin/messages.js";
 import type { PromptBufferItem } from "./prompt-buffer.js";
+import { formatCompletionSubject, type TaskCompletionNotice } from "../notifications/task-completion-email.js";
 
 export type ApiProfileCommandService = {
   list: () => ApiProfileSummary[];
@@ -64,6 +65,8 @@ export type BridgeServiceOptions = {
   deferTask?: (task: () => Promise<void>) => void;
   scheduleGoalContinuation?: (task: () => Promise<void>, delayMs: number) => void;
   retryDelay?: (retryAttempt: number) => Promise<void> | void;
+  accountIdentity?: { index: number; displayName?: string };
+  taskCompletionNotifier?: (notice: TaskCompletionNotice) => Promise<void> | void;
 };
 
 type ActiveTurnControl = {
@@ -992,10 +995,11 @@ export class BridgeService {
         }
         const parsed = parseActionBlocks(result.text);
         const remaining = chunkText(parsed.visibleText);
+        let deliveredFinalReply = false;
         if (remaining.length) {
           for (const chunk of remaining) {
             if (control.cancelled) return;
-            await this.reply(message.senderId, chunk, true);
+            deliveredFinalReply = (await this.reply(message.senderId, chunk, true)) || deliveredFinalReply;
           }
         }
         const actionsByPath = new Map<string, SendAction>();
@@ -1006,7 +1010,18 @@ export class BridgeService {
           if (control.cancelled) return;
           await this.sendLocalMedia(message.senderId, action);
         }
+        const activeGoal = this.options.stateStore.getActiveSession(message.senderId);
+        const goalTaskName = isGoalActive(activeGoal) ? activeGoal.goal : undefined;
         this.reconcileGoalAfterTurn(message.senderId, result, isGoalContinuation);
+        const goalCompleted = Boolean(goalTaskName)
+          && this.options.stateStore.getActiveSession(message.senderId)?.goalStatus === "completed";
+        if (deliveredFinalReply && (!goalTaskName || goalCompleted)) {
+          await this.notifyTaskCompletion({
+            taskName: goalTaskName || promptPreview || text || "Codex 任务",
+            finalSummary: parsed.visibleText.replace(/\s+/g, " ").trim().slice(0, 300),
+            attachmentCount: actionsByPath.size
+          });
+        }
       });
     } catch (error) {
       if (!control.cancelled) throw error;
@@ -1255,6 +1270,32 @@ export class BridgeService {
     }
   }
 
+  private async notifyTaskCompletion(input: {
+    taskName: string;
+    finalSummary: string;
+    attachmentCount: number;
+  }): Promise<void> {
+    const identity = this.options.accountIdentity;
+    const notify = this.options.taskCompletionNotifier;
+    if (!identity || !notify) return;
+    const taskName = singleLine(input.taskName) || "Codex 任务";
+    const notice: TaskCompletionNotice = {
+      subject: formatCompletionSubject(identity.index, taskName),
+      taskName,
+      accountIndex: identity.index,
+      ...(identity.displayName ? { accountDisplayName: identity.displayName } : {}),
+      finalSummary: input.finalSummary || "(无文本回复)",
+      attachmentCount: input.attachmentCount,
+      completedAt: new Date().toISOString()
+    };
+    try {
+      await notify(notice);
+      console.log(`[codex-weixin] completion email sent: ${notice.subject}`);
+    } catch (error) {
+      console.warn(`[codex-weixin] completion email failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private async sendLocalMedia(senderId: string, action: { type: "image" | "file" | "video"; path: string }): Promise<void> {
     try {
       await sendLocalMediaFile({
@@ -1482,8 +1523,10 @@ function parseCommand(text: string): { name: string; arg: string } | undefined {
 function helpText(): string {
   return [
     "codex-weixin 指令：",
+    "",
     "/help - 查看全部指令和用法",
     "/status - 查看当前 API、模型、推理强度和会话状态",
+    "",
     "/api - 查看已保存 API 和当前使用项",
     "/api <编号或名称> - 测试并切换 API",
     "/1 - API 切换确认时，中断执行中任务并继续切换",
@@ -1494,6 +1537,7 @@ function helpText(): string {
     "/api set <编号或名称> <模型ID> <推理强度> - 设置 API 默认值",
     "/api add <名称> <Base URL> [模型ID] - 安全添加 API",
     "/api cancel - 取消等待输入 API Key 或待确认的 API 切换（兼容 /2）",
+    "",
     "/bind <绝对路径> - 绑定工作目录",
     "/new - 创建新的 Codex 会话",
     "/resume [R编号] - 查看或切换历史会话",
@@ -1502,10 +1546,11 @@ function helpText(): string {
     "/stream [on|off|default] - 查看或切换流式进度",
     "/goal [目标|pause|resume|clear] - 开启、查看、暂停、恢复或清除当前会话目标",
     "/目标 [目标|暂停|继续|清除] - /goal 的中文别名；/goaloff、/目标解除可直接关闭目标",
+    "",
     "/prompt start - 开始缓存多条消息",
     "/prompt done - 提交已缓存消息",
     "/stop - 立即中止当前 Codex 任务"
-  ].join("\n");
+  ].join("\r\n");
 }
 
 function selectApiProfile(profiles: ApiProfileSummary[], selector: string): ApiProfileSummary | undefined {

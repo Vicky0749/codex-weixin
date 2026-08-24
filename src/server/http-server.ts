@@ -169,6 +169,11 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     }
   }
 
+  if (method === "GET" && url.pathname === "/api/health") {
+    const health = context.accountManager.getWatchdogHealth();
+    sendJson(response, health.ok ? 200 : 503, health);
+    return;
+  }
   if (method === "GET" && url.pathname === "/api/bootstrap") {
     const config = loadConfig(context.paths);
     const [codex, codexRuntime, codexModels, startup] = await Promise.all([

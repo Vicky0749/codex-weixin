@@ -35,6 +35,7 @@ export type StartupServiceOptions = {
   env?: NodeJS.ProcessEnv;
   startupDir?: string;
   launcherPath?: string;
+  silentLauncherPath?: string;
   fileSystem?: StartupFileSystem;
   createShortcut?: (shortcut: StartupShortcut) => Promise<void>;
 };
@@ -44,6 +45,7 @@ export class WindowsStartupService implements StartupService {
   private readonly env: NodeJS.ProcessEnv;
   private readonly startupDir: string;
   private readonly launcherPath: string;
+  private readonly silentLauncherPath: string;
   private readonly fileSystem: StartupFileSystem;
   private readonly createShortcutImpl: (shortcut: StartupShortcut) => Promise<void>;
 
@@ -54,6 +56,8 @@ export class WindowsStartupService implements StartupService {
     this.launcherPath = options.launcherPath
       ?? this.env.CODEX_WEIXIN_LAUNCHER_PATH
       ?? fileURLToPath(new URL("../../scripts/codex-weixin-launcher.ps1", import.meta.url));
+    this.silentLauncherPath = options.silentLauncherPath
+      ?? path.join(path.dirname(this.launcherPath), "codex-weixin-silent-launcher.vbs");
     this.fileSystem = options.fileSystem ?? fs;
     this.createShortcutImpl = options.createShortcut
       ?? ((shortcut) => createShortcutWithPowerShell(shortcut, this.env));
@@ -81,13 +85,16 @@ export class WindowsStartupService implements StartupService {
       if (!this.fileSystem.existsSync(this.launcherPath)) {
         throw new Error(`Codex 微信 ClawBot launcher not found: ${this.launcherPath}`);
       }
+      if (!this.fileSystem.existsSync(this.silentLauncherPath)) {
+        throw new Error(`Codex 微信 ClawBot silent launcher not found: ${this.silentLauncherPath}`);
+      }
       const shortcutPath = this.preferredShortcutPath();
       this.fileSystem.mkdirSync(this.startupDir, { recursive: true });
       await this.createShortcutImpl({
         shortcutPath,
-        targetPath: resolvePowerShellPath(this.env),
-        arguments: buildLauncherArguments(this.launcherPath),
-        workingDirectory: path.dirname(this.launcherPath)
+        targetPath: resolveWScriptPath(this.env),
+        arguments: buildSilentLauncherArguments(this.silentLauncherPath),
+        workingDirectory: path.dirname(this.silentLauncherPath)
       });
       removeIfPresent(this.fileSystem, this.legacyShortcutPath());
       return this.getStartupStatus();
@@ -131,8 +138,12 @@ function resolvePowerShellPath(env: NodeJS.ProcessEnv): string {
   return path.join(env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
 
-function buildLauncherArguments(launcherPath: string): string {
-  return `-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${launcherPath}" -NoOpen`;
+function resolveWScriptPath(env: NodeJS.ProcessEnv): string {
+  return path.join(env.SystemRoot ?? "C:\\Windows", "System32", "wscript.exe");
+}
+
+function buildSilentLauncherArguments(silentLauncherPath: string): string {
+  return `"${silentLauncherPath}"`;
 }
 
 function removeIfPresent(fileSystem: StartupFileSystem, filePath: string): void {

@@ -8,6 +8,7 @@ export type MonitorOptions = {
   maxPollRetryMs?: number;
   initialSyncKey?: string;
   onSyncKey?: (syncKey: string) => Promise<void> | void;
+  onPollSuccess?: () => Promise<void> | void;
   claimMessage?: (message: NormalizedWeixinMessage) => boolean;
   onMessage: (message: NormalizedWeixinMessage) => Promise<void>;
   onMessageError?: (error: unknown, message: NormalizedWeixinMessage) => Promise<void> | void;
@@ -64,6 +65,7 @@ export async function monitorWeixin(options: MonitorOptions): Promise<void> {
         syncKey = batch.syncKey;
         await options.onSyncKey?.(syncKey);
       }
+      await options.onPollSuccess?.();
     } catch (error) {
       const retryMs = retryBackoff.next();
       console.error(`[codex-weixin] monitor poll failed; retrying in ${retryMs}ms: ${errorDetail(error)}`);
