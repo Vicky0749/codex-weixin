@@ -109,14 +109,12 @@ export class TaskCompletionEmailNotifier {
   }
 }
 
-export function formatCompletionSubject(accountIndex: number, taskName: string): string {
-  return `${accountIndex}-已完成：${taskName}`;
+export function formatCompletionSubject(accountName: string, taskName: string): string {
+  return `${accountName}-已完成：${taskName}`;
 }
 
 function formatNoticeText(notice: TaskCompletionNotice): string {
-  const account = notice.accountDisplayName
-    ? `${notice.accountIndex}（${notice.accountDisplayName}）`
-    : String(notice.accountIndex);
+  const account = notice.accountDisplayName?.trim() || "未命名微信";
   return [
     `微信账号：${account}`,
     `任务：${notice.taskName}`,

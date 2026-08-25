@@ -14,7 +14,7 @@ import { WeixinApiError } from "../src/weixin/api.js";
 import { encryptAesEcb } from "../src/weixin/media.js";
 import { normalizeWeixinMessage } from "../src/weixin/messages.js";
 
-test("sends a numbered completion notification after the final WeChat reply", async (t) => {
+test("sends a named completion notification after the final WeChat reply", async (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-completion-notice-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
   const stateStore = new RuntimeStateStore(resolveStatePaths(path.join(tmpDir, "state")));
@@ -56,7 +56,7 @@ test("sends a numbered completion notification after the final WeChat reply", as
   });
 
   assert.equal(notices.length, 1);
-  assert.equal(notices[0].subject, "3-已完成：整理三季度费用明细");
+  assert.equal(notices[0].subject, "heeo-已完成：整理三季度费用明细");
   assert.equal(notices[0].taskName, "整理三季度费用明细");
   assert.equal(notices[0].accountIndex, 3);
   assert.equal(notices[0].accountDisplayName, "heeo");
@@ -65,7 +65,7 @@ test("sends a numbered completion notification after the final WeChat reply", as
   assert.match(notices[0].completedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.deepEqual(order, [
     "reply:【本轮处理结果】\n状态：已完成\n已处理：费用明细已整理。",
-    "mail:3-已完成：整理三季度费用明细"
+    "mail:heeo-已完成：整理三季度费用明细"
   ]);
 });
 
@@ -863,7 +863,7 @@ test("continues an active goal at an idle boundary until evidence marks it compl
   assert.equal(scheduled.length, 0);
   assert.equal(notices.length, 1);
   assert.equal(notices[0]?.taskName, stateStore.getActiveSession("alice@im.wechat")?.goal);
-  assert.match(notices[0]?.subject ?? "", /^4-/);
+  assert.match(notices[0]?.subject ?? "", /^Serendipity-/);
 });
 
 test("pauses a queued goal continuation when the user sends stop", async (t) => {

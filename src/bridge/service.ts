@@ -1279,11 +1279,12 @@ export class BridgeService {
     const notify = this.options.taskCompletionNotifier;
     if (!identity || !notify) return;
     const taskName = singleLine(input.taskName) || "Codex 任务";
+    const accountName = singleLine(identity.displayName ?? "") || "未命名微信";
     const notice: TaskCompletionNotice = {
-      subject: formatCompletionSubject(identity.index, taskName),
+      subject: formatCompletionSubject(accountName, taskName),
       taskName,
       accountIndex: identity.index,
-      ...(identity.displayName ? { accountDisplayName: identity.displayName } : {}),
+      accountDisplayName: accountName,
       finalSummary: input.finalSummary || "(无文本回复)",
       attachmentCount: input.attachmentCount,
       completedAt: new Date().toISOString()

@@ -19,7 +19,7 @@ class FakeProtector implements SecretProtector {
   }
 }
 
-test("stores the SMTP password encrypted and sends the numbered completion subject", async (t) => {
+test("stores the SMTP password encrypted and sends the named completion subject", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-completion-email-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const paths = resolveStatePaths(root);
@@ -54,7 +54,7 @@ test("stores the SMTP password encrypted and sends the numbered completion subje
   });
 
   await notifier.notify({
-    subject: "4-已完成：整理三季度费用明细",
+    subject: "Serendipity-已完成：整理三季度费用明细",
     taskName: "整理三季度费用明细",
     accountIndex: 4,
     accountDisplayName: "Serendipity",
@@ -72,9 +72,9 @@ test("stores the SMTP password encrypted and sends the numbered completion subje
   assert.deepEqual(mail, {
     from: "sender@example.com",
     to: "recipient@example.com",
-    subject: "4-已完成：整理三季度费用明细",
+    subject: "Serendipity-已完成：整理三季度费用明细",
     text: [
-      "微信账号：4（Serendipity）",
+      "微信账号：Serendipity",
       "任务：整理三季度费用明细",
       "完成时间：2026-08-24 14:00",
       "附件数：1",
