@@ -1,9 +1,10 @@
 param(
     [switch]$NoOpen,
+    [switch]$Supervisor,
     [string]$NodePath = "",
     [string]$EntryPath = "",
     [string]$WorkingDirectory = "",
-    [string]$ServiceUrl = "http://127.0.0.1:8787",
+    [string]$ServiceUrl = "http://127.0.0.1:18787",
     [string[]]$NodeArguments = @(),
     [ValidateRange(1, 10)]
     [int]$MaxStartupAttempts = 3,
@@ -16,6 +17,23 @@ param(
 $ErrorActionPreference = "Stop"
 $packageRoot = Split-Path -Parent $PSScriptRoot
 $logDirectory = Join-Path $env:LOCALAPPDATA "CodexWeixin\logs"
+
+if ($Supervisor) {
+    $supervisorPath = Join-Path $PSScriptRoot "codex-weixin-supervisor.ps1"
+    if (-not $NoOpen) {
+        Start-Process $ServiceUrl
+    }
+    & $supervisorPath `
+        -NodePath $NodePath `
+        -EntryPath $EntryPath `
+        -WorkingDirectory $WorkingDirectory `
+        -ServiceUrl $ServiceUrl `
+        -NodeArguments $NodeArguments `
+        -MaxStartupAttempts $MaxStartupAttempts `
+        -StartupAttemptTimeoutSeconds $StartupAttemptTimeoutSeconds `
+        -RetryDelaySeconds $RetryDelaySeconds
+    exit $LASTEXITCODE
+}
 
 if ([string]::IsNullOrWhiteSpace($NodePath)) {
     $nvmNodePath = "C:\nvm4w\nodejs\node.exe"
@@ -35,14 +53,32 @@ if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) {
 }
 
 function Test-CodexWeixinService {
-    $status = & curl.exe `
-        --noproxy "*" `
-        --silent `
-        --output NUL `
-        --write-out "%{http_code}" `
-        --max-time 2 `
-        "$ServiceUrl/api/bootstrap"
-    return $LASTEXITCODE -eq 0 -and $status.Trim() -eq "200"
+    try {
+        $request = [System.Net.HttpWebRequest]::Create("$ServiceUrl/api/health")
+        $request.Proxy = $null
+        $request.Timeout = 5000
+        $request.ReadWriteTimeout = 5000
+        $response = [System.Net.HttpWebResponse]$request.GetResponse()
+        try {
+            if ([int]$response.StatusCode -ne 200) {
+                return $false
+            }
+            $reader = [IO.StreamReader]::new($response.GetResponseStream())
+            try {
+                $health = $reader.ReadToEnd() | ConvertFrom-Json
+                return $health.ok -eq $true
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            $response.Dispose()
+        }
+    }
+    catch {
+        return $false
+    }
 }
 
 function Write-LauncherLog {

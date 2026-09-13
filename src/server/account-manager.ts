@@ -15,6 +15,8 @@ import { BridgeService, type ApiProfileCommandService } from "../bridge/service.
 import { userFacingMessageHandlingError } from "../bridge/errors.js";
 import type { CodexHistoryMessage, CodexModelOption, CodexRuntimeInfo } from "../codex/app-server-runner.js";
 import { HybridCodexRunner } from "../codex/runner.js";
+import { TaskCompletionEmailNotifier, type TaskCompletionNotice } from "../notifications/task-completion-email.js";
+import { WindowsDpapiProtector } from "../security/dpapi.js";
 import { isWorkspaceAllowed, loadConfig, type CodexWeixinConfig } from "../state/config.js";
 import { accountStatePaths, type StatePaths } from "../state/paths.js";
 import { RuntimeStateStore, type ManagedSession, type SessionRuntimeOverrides } from "../state/runtime-state.js";
@@ -40,6 +42,7 @@ export type AccountSummary = PublicWeixinAccount & {
   status: AccountRunStatus;
   error?: string;
   pairedSenderIds: string[];
+  apiKeyOwnerSenderId?: string;
   lastActiveSenderId?: string;
   sessionCount: number;
 };
@@ -82,6 +85,8 @@ type InternalSessionHistoryMessage = CodexHistoryMessage & {
 
 type RuntimeEntry = {
   status: AccountRunStatus;
+  startedAt?: number;
+  lastSuccessfulPollAt?: number;
   controller?: AbortController;
   task?: Promise<void>;
   service?: BridgeService;
@@ -105,7 +110,18 @@ export type AccountManagerOptions = {
   monitor?: (options: MonitorOptions) => Promise<void>;
   runnerFactory?: (config: CodexWeixinConfig) => HybridCodexRunner;
   terminalReportRetryDelay?: (retryAttempt: number) => Promise<void> | void;
+  taskCompletionNotifier?: (notice: TaskCompletionNotice) => Promise<void> | void;
 };
+
+export type BridgeWatchdogHealth = {
+  ok: boolean;
+  checkedAt: string;
+  enabledAccountCount: number;
+  activeTaskCount: number;
+  staleAccountIds: string[];
+};
+
+const WATCHDOG_POLL_STALE_AFTER_MS = 90_000;
 
 type RuntimePreparation = () => Promise<void> | void;
 
@@ -123,6 +139,7 @@ export class AccountManager {
   private readonly monitor: (options: MonitorOptions) => Promise<void>;
   private readonly runnerFactory: (config: CodexWeixinConfig) => HybridCodexRunner;
   private readonly terminalReportRetryDelay: (retryAttempt: number) => Promise<void> | void;
+  private readonly taskCompletionNotifier: (notice: TaskCompletionNotice) => Promise<void> | void;
   private runner?: HybridCodexRunner;
   private apiProfiles?: ApiProfileCommandService;
   private runtimeRestartPromise?: Promise<void>;
@@ -148,6 +165,12 @@ export class AccountManager {
       const delayMs = Math.min(retryAttempt * 1_000, 10_000);
       await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
     });
+    const completionEmailNotifier = new TaskCompletionEmailNotifier({
+      paths: options.paths,
+      protector: new WindowsDpapiProtector()
+    });
+    this.taskCompletionNotifier = options.taskCompletionNotifier
+      ?? ((notice) => completionEmailNotifier.notify(notice));
   }
 
   async startAll(): Promise<void> {
@@ -216,6 +239,27 @@ export class AccountManager {
     return weChatTurns + webTurns;
   }
 
+  getWatchdogHealth(now = Date.now()): BridgeWatchdogHealth {
+    const enabledAccounts = listAccounts(this.options.paths).filter((account) => account.enabled);
+    const staleAccountIds = enabledAccounts
+      .filter((account) => {
+        const entry = this.entries.get(account.accountId);
+        const lastObservedAt = entry?.lastSuccessfulPollAt ?? entry?.startedAt;
+        return entry?.status !== "running"
+          || !lastObservedAt
+          || now - lastObservedAt > WATCHDOG_POLL_STALE_AFTER_MS;
+      })
+      .map((account) => account.accountId);
+
+    return {
+      ok: staleAccountIds.length === 0,
+      checkedAt: new Date(now).toISOString(),
+      enabledAccountCount: enabledAccounts.length,
+      activeTaskCount: this.getActiveTaskCount(),
+      staleAccountIds
+    };
+  }
+
   async refreshAccount(accountId: string): Promise<AccountSummary> {
     const account = loadAccount(this.options.paths, accountId);
     const existing = this.entries.get(account.accountId);
@@ -245,10 +289,12 @@ export class AccountManager {
       runner: this.runnerFor(config),
       listCodexModels: () => this.getCodexModels(),
       apiProfiles: this.apiProfiles,
+      accountIdentity: this.accountIdentity(account),
+      taskCompletionNotifier: this.taskCompletionNotifier,
       onTurnStatus: ({ sessionId, active }) => this.setSessionResponding(account.accountId, sessionId, active),
       waitForRuntimeReady: () => this.waitForRuntimeReady()
     });
-    const entry: RuntimeEntry = { status: "starting", controller, service, store };
+    const entry: RuntimeEntry = { status: "starting", startedAt: Date.now(), controller, service, store };
     this.entries.set(account.accountId, entry);
 
     entry.status = "running";
@@ -257,6 +303,9 @@ export class AccountManager {
       signal: controller.signal,
       initialSyncKey: store.getSyncKey(),
       onSyncKey: (syncKey) => store.setSyncKey(syncKey),
+      onPollSuccess: () => {
+        entry.lastSuccessfulPollAt = Date.now();
+      },
       claimMessage: (message) => store.claimProcessedMessage(message.id),
       onMessage: (message) => service.handleMessage(message),
       onMessageError: async (error, message) => {
@@ -641,13 +690,28 @@ export class AccountManager {
   }
 
   removeSender(accountId: string, senderId: string): void {
-    const entry = this.entries.get(loadAccount(this.options.paths, accountId).accountId);
+    const account = loadAccount(this.options.paths, accountId);
+    const entry = this.entries.get(account.accountId);
     if (entry?.service) {
       entry.service.removeSender(senderId);
-      return;
+    } else {
+      const store = this.storeFor(account.accountId);
+      store.setPairedSenderIds(store.listPairedSenderIds().filter((candidate) => candidate !== senderId));
     }
-    const store = this.storeFor(accountId);
-    store.setPairedSenderIds(store.listPairedSenderIds().filter((candidate) => candidate !== senderId));
+    const store = this.storeFor(account.accountId);
+    if (store.getApiKeyOwnerSenderId() === senderId) {
+      store.setApiKeyOwnerSenderId();
+    }
+  }
+
+  setApiKeyOwner(accountId: string, senderId: string): AccountSummary {
+    const account = loadAccount(this.options.paths, accountId);
+    const store = this.storeFor(account.accountId);
+    if (!store.listPairedSenderIds().includes(senderId)) {
+      throw new Error("API key owner must be an authorized sender");
+    }
+    store.setApiKeyOwnerSenderId(senderId);
+    return this.summary(account);
   }
 
   private storeFor(accountId: string): RuntimeStateStore {
@@ -781,8 +845,17 @@ export class AccountManager {
       status: entry?.status ?? "stopped",
       ...(entry?.error ? { error: entry.error } : {}),
       pairedSenderIds: store.listPairedSenderIds(),
+      ...(store.getApiKeyOwnerSenderId() ? { apiKeyOwnerSenderId: store.getApiKeyOwnerSenderId() } : {}),
       lastActiveSenderId: store.getLastActiveSenderId(),
       sessionCount: store.listSessions().length
+    };
+  }
+
+  private accountIdentity(account: WeixinAccount): { index: number; displayName?: string } {
+    const index = listAccounts(this.options.paths).findIndex((candidate) => candidate.accountId === account.accountId) + 1;
+    return {
+      index: index || 1,
+      ...(account.displayName ? { displayName: account.displayName } : {})
     };
   }
 }

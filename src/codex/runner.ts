@@ -15,7 +15,10 @@ export type HybridCodexRunnerOptions = {
   codexBin?: string;
   execSandbox?: CodexExecSandbox;
   timeoutMs?: number;
+  turnStatusProbeIntervalMs?: number;
 };
+
+const DEFAULT_TURN_STATUS_PROBE_INTERVAL_MS = 90_000;
 
 export class HybridCodexRunner {
   private readonly appServer: AppServerCodexRunner;
@@ -25,7 +28,9 @@ export class HybridCodexRunner {
   constructor(private readonly options: HybridCodexRunnerOptions) {
     this.appServer = new AppServerCodexRunner({
       codexBin: options.codexBin,
-      requestTimeoutMs: options.timeoutMs
+      requestTimeoutMs: options.timeoutMs,
+      // This checks for a lost completion event; it never stops an in-progress turn.
+      turnStallTimeoutMs: normalizeTurnStatusProbeInterval(options.turnStatusProbeIntervalMs)
     });
     this.exec = new CodexExecRunner({
       codexBin: options.codexBin,
@@ -90,4 +95,11 @@ export class HybridCodexRunner {
       throw new Error("Codex runner is closed");
     }
   }
+}
+
+function normalizeTurnStatusProbeInterval(value: number | undefined): number {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  return DEFAULT_TURN_STATUS_PROBE_INTERVAL_MS;
 }

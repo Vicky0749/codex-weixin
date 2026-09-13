@@ -126,6 +126,53 @@ test("account deletion passes the session-history retention choice", async (t) =
   ]);
 });
 
+test("local management can designate and revoke the private API-key owner", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-key-owner-http-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = resolveStatePaths(root);
+  saveConfig(paths, defaultConfig(root));
+  saveAccount(paths, {
+    accountId: "account-one",
+    token: "token",
+    baseUrl: "https://example.test",
+    cdnBaseUrl: "https://cdn.example.test",
+    savedAt: new Date().toISOString(),
+    enabled: false
+  });
+  const server = await startLocalHttpServer({
+    paths,
+    accountManager: new AccountManager({ paths }),
+    port: 0
+  });
+  t.after(() => server.close());
+  const ownerUrl = `${server.url}/api/accounts/account-one/senders/owner%40im.wechat/key-owner`;
+  const headers = {
+    "X-Codex-Weixin-Token": server.requestToken,
+    Origin: server.url
+  };
+
+  const rejected = await fetch(ownerUrl, { method: "POST", headers });
+  assert.equal(rejected.status, 400);
+
+  const allowed = await fetch(`${server.url}/api/accounts/account-one/senders/owner%40im.wechat/allow`, {
+    method: "POST",
+    headers
+  });
+  assert.equal(allowed.status, 200);
+
+  const configured = await fetch(ownerUrl, { method: "POST", headers });
+  assert.equal(configured.status, 200);
+  assert.equal((await configured.json()).account.apiKeyOwnerSenderId, "owner@im.wechat");
+
+  const removed = await fetch(`${server.url}/api/accounts/account-one/senders/owner%40im.wechat/remove`, {
+    method: "POST",
+    headers
+  });
+  assert.equal(removed.status, 200);
+  const accounts = await (await fetch(`${server.url}/api/accounts`)).json();
+  assert.equal(accounts.accounts[0].apiKeyOwnerSenderId, undefined);
+});
+
 test("local API redacts credentials and protects mutations", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-http-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

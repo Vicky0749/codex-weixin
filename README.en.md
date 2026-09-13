@@ -114,6 +114,15 @@ The UI uses local remarks instead of treating internal IDs as account names. Exp
 ```text
 /help                         Show commands
 /status                       Show session, workspace, thread, backend, effective model, and reasoning effort
+/api                          List saved API profiles, their models, and the active profile
+/api <number-or-name>         Test and switch API profile
+/api test <number-or-name>    Test an API profile without switching
+/api set <number-or-name> <model-id> <effort> Set API-profile model and reasoning defaults
+/api add <name> <URL> [model-id] [effort] Add an API profile; the next plain-text message is its API key
+/api key <number-or-name>     Show an API key to the designated key owner only
+/api cancel                   Cancel pending API-key input or API-switch confirmation
+/1                            Confirm an API switch that interrupts active tasks
+/2                            Cancel a pending API switch
 /bind <absolute-path>          Bind to an allowed workspace
 /new                          Create a new managed Codex session
 /resume                       List historical sessions with recent prompt summaries
@@ -128,6 +137,8 @@ The UI uses local remarks instead of treating internal IDs as account names. Exp
 /prompt done                  Submit the buffer as one Codex turn
 /stop                         Interrupt the current Codex task
 ```
+
+`/api` displays the model, URL, and final four characters of each saved key. `/api add` waits two minutes; its next plain-text message is used only to verify and protect the key with Windows DPAPI, is not sent to Codex or stored in session history, and does not activate the profile automatically. Select a key owner manually from an authorized sender on the local WeChat Accounts page. Only that sender can use `/api key <number-or-name>` to receive a complete key. WeChat does not provide dependable disappearing messages, so delete any key message manually after copying it.
 
 Regular messages enter the active session. Images, files, videos, and voice/audio without transcription are saved under the account's inbound directory and added to the prompt by local path. WeChat voice transcription is preferred when available.
 

@@ -26,6 +26,8 @@
   "files": [
     "dist/",
     "scripts/codex-weixin-launcher.ps1",
+    "scripts/codex-weixin-supervisor.ps1",
+    "scripts/codex-weixin-silent-launcher.vbs",
     "resources/",
     "src/web/favicon.svg",
     "README.md",
@@ -52,12 +54,14 @@
     "dompurify": "^3.4.12",
     "lucide": "^0.468.0",
     "marked": "^18.0.6",
+    "nodemailer": "^6.10.1",
     "open": "^10.1.0",
     "qrcode": "^1.5.4",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/nodemailer": "^6.4.17",
     "@types/qrcode": "^1.5.5",
     "tsx": "^4.19.2",
     "typescript": "^5.8.3"

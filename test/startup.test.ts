@@ -12,7 +12,9 @@ test("Windows startup service creates the preferred shortcut and removes only ma
   const appData = path.join(root, "AppData", "Roaming");
   const startupDir = path.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
   const launcherPath = path.join(root, "codex-weixin-launcher.ps1");
+  const silentLauncherPath = path.join(root, "codex-weixin-silent-launcher.vbs");
   fs.writeFileSync(launcherPath, "# launcher\n");
+  fs.writeFileSync(silentLauncherPath, "' silent launcher\n");
   const created: Array<{ shortcutPath: string; targetPath: string; arguments: string; workingDirectory: string }> = [];
   const service = createStartupService({
     platform: "win32",
@@ -36,8 +38,8 @@ test("Windows startup service creates the preferred shortcut and removes only ma
   await service.setStartupEnabled(true);
   assert.deepEqual(created, [{
     shortcutPath: preferredPath,
-    targetPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-    arguments: `-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${launcherPath}" -NoOpen`,
+    targetPath: "C:\\Windows\\System32\\wscript.exe",
+    arguments: `"${silentLauncherPath}"`,
     workingDirectory: root
   }]);
   assert.deepEqual(service.getStartupStatus(), {
@@ -61,7 +63,9 @@ test("Windows startup service recognizes an existing legacy shortcut and migrate
   const appData = path.join(root, "AppData", "Roaming");
   const startupDir = path.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
   const launcherPath = path.join(root, "codex-weixin-launcher.ps1");
+  const silentLauncherPath = path.join(root, "codex-weixin-silent-launcher.vbs");
   fs.writeFileSync(launcherPath, "# launcher\n");
+  fs.writeFileSync(silentLauncherPath, "' silent launcher\n");
   fs.mkdirSync(startupDir, { recursive: true });
   const legacyPath = path.join(startupDir, "微信 Codex 管理台.lnk");
   fs.writeFileSync(legacyPath, "legacy shortcut");

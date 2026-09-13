@@ -3,6 +3,8 @@ export type MessageHandlingErrorContext = {
 };
 
 const UNCLASSIFIED_ERROR_MESSAGE = "[codex-weixin] 本轮处理遇到未分类错误，详细原因已写入本机服务输出。发送 /help 查看可用指令。";
+const TRANSIENT_NETWORK_ERROR_PATTERN =
+  /fetch failed|econnreset|econnrefused|eai_again|enotfound|enetunreach|ehostunreach|etimedout|econnaborted|epipe|und_err_(?:connect_timeout|socket|fetch)|network(?: error| failure)?|socket hang up|connection (?:reset|refused|closed|timed out|timeout)|stream disconnected/i;
 
 export function userFacingMessageHandlingError(
   error: unknown,
@@ -35,7 +37,7 @@ export function userFacingMessageHandlingError(
   if (/timed out|timeout/i.test(message)) {
     return `[codex-weixin] ${api}响应超时。本轮未完成，请重试或发送 /api 切换备用 API。`;
   }
-  if (/fetch failed|econnreset|econnrefused|enotfound|network|socket hang up|stream disconnected/i.test(message)) {
+  if (TRANSIENT_NETWORK_ERROR_PATTERN.test(message)) {
     return `[codex-weixin] 无法稳定连接${api}。请检查网络后重试，或发送 /api 切换备用 API。`;
   }
   return UNCLASSIFIED_ERROR_MESSAGE;
@@ -44,7 +46,8 @@ export function userFacingMessageHandlingError(
 export function isUnclassifiedMessageHandlingError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   if (
-    /stream disconnected before completion|stream closed before response\.completed|app-server turn stream became unresponsive|app-server request [^\s]+ timed out|codex app-server exited with code|codex app-server stdio transport is not connected|fetch failed|econnreset|econnrefused|enotfound|socket hang up/i.test(message)
+    /stream disconnected before completion|stream closed before response\.completed|app-server turn stream became unresponsive|app-server request [^\s]+ timed out|codex app-server exited with code|codex app-server stdio transport is not connected/i.test(message) ||
+    TRANSIENT_NETWORK_ERROR_PATTERN.test(message)
   ) {
     return true;
   }

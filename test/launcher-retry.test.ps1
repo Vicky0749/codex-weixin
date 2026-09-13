@@ -29,7 +29,10 @@ $listener.Prefixes.Add("$($env:LAUNCHER_TEST_SERVICE_URL)/")
 $listener.Start()
 while ($true) {
     $context = $listener.GetContext()
+    $bytes = [Text.Encoding]::UTF8.GetBytes('{"ok":true}')
     $context.Response.StatusCode = 200
+    $context.Response.ContentType = 'application/json'
+    $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
     $context.Response.Close()
 }
 '@
@@ -38,7 +41,7 @@ $env:LAUNCHER_TEST_ATTEMPT_FILE = $attemptFile
 $env:LAUNCHER_TEST_SERVICE_URL = $serviceUrl
 
 try {
-    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcherPath `
+    & powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File $launcherPath `
         -NoOpen `
         -NodePath $PSHOME\powershell.exe `
         -EntryPath $fakeEntryPath `
@@ -58,9 +61,9 @@ try {
         throw "Expected the launcher to retry once after the first failed child process; actual attempts: $attempts."
     }
 
-    $status = & curl.exe --noproxy '*' --silent --output NUL --write-out '%{http_code}' --max-time 2 "$serviceUrl/api/bootstrap"
-    if ($LASTEXITCODE -ne 0 -or $status.Trim() -ne '200') {
-        throw "Expected a healthy service after retry; actual status: $status."
+    $response = Invoke-WebRequest -UseBasicParsing -Uri "$serviceUrl/api/health" -TimeoutSec 2
+    if ($response.StatusCode -ne 200 -or $response.Content -notmatch '"ok"\s*:\s*true') {
+        throw "Expected a healthy service after retry."
     }
 
     Write-Host 'PASS launcher retries a failed child start and reaches a healthy service.'

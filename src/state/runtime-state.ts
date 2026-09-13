@@ -30,6 +30,7 @@ export type SessionRuntimeOverrides = {
 
 export type RuntimeState = {
   pairedSenderIds: string[];
+  apiKeyOwnerSenderId?: string;
   lastActiveSenderId?: string;
   syncKey?: string;
   processedMessageIds: string[];
@@ -76,6 +77,20 @@ export class RuntimeStateStore {
 
   setPairedSenderIds(senderIds: string[]): void {
     this.state.pairedSenderIds = [...new Set(senderIds)].sort();
+    this.save();
+  }
+
+  getApiKeyOwnerSenderId(): string | undefined {
+    return this.state.apiKeyOwnerSenderId;
+  }
+
+  setApiKeyOwnerSenderId(senderId?: string): void {
+    const normalized = senderId?.trim();
+    if (normalized) {
+      this.state.apiKeyOwnerSenderId = normalized;
+    } else {
+      delete this.state.apiKeyOwnerSenderId;
+    }
     this.save();
   }
 
@@ -412,6 +427,9 @@ function normalizeRuntimeState(value: Partial<RuntimeState>): RuntimeState {
     ...emptyRuntimeState(),
     ...value,
     pairedSenderIds: Array.isArray(value.pairedSenderIds) ? value.pairedSenderIds : [],
+    apiKeyOwnerSenderId: typeof value.apiKeyOwnerSenderId === "string" && value.apiKeyOwnerSenderId.trim()
+      ? value.apiKeyOwnerSenderId.trim()
+      : undefined,
     processedMessageIds: Array.isArray(value.processedMessageIds)
       ? value.processedMessageIds.filter((id): id is string => typeof id === "string").slice(-1_000)
       : [],

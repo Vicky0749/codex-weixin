@@ -392,6 +392,24 @@ test("isolates senders and managed sessions by account", async (t) => {
   await manager.stopAccount("account-two");
 });
 
+test("allows only a paired sender to become the private API-key owner", async (t) => {
+  const { manager, paths } = setup(t);
+  await manager.startAll();
+  manager.allowSender("account-one", "owner@im.wechat");
+
+  assert.throws(
+    () => manager.setApiKeyOwner("account-one", "unpaired@im.wechat"),
+    /authorized sender/i
+  );
+  const configured = manager.setApiKeyOwner("account-one", "owner@im.wechat");
+  assert.equal(configured.apiKeyOwnerSenderId, "owner@im.wechat");
+
+  manager.removeSender("account-one", "owner@im.wechat");
+  assert.equal(manager.listAccounts().find((account) => account.accountId === "account-one")?.apiKeyOwnerSenderId, undefined);
+  assert.equal(new RuntimeStateStore(accountStatePaths(paths, "account-one")).getApiKeyOwnerSenderId(), undefined);
+  await manager.stopAll();
+});
+
 test("persists and clears a local account display name", (t) => {
   const { manager, paths } = setup(t);
 
