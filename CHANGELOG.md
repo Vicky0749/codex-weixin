@@ -2,6 +2,25 @@
 
 All notable changes to `codex-weixin` are documented in this file.
 
+## [0.3.11] - 2026-11-16
+
+### Added
+
+- Added a persistent goal mode for WeChat sessions. `/goal <目标>` (or `/目标`) starts a goal and keeps resuming the session whenever it goes idle until the goal is complete or blocked. `/goal` shows the current goal, `/goal pause|resume|clear` controls it, and `/goaloff` or `/目标解除` turns it off. `/stop` pauses a running goal.
+
+### Changed
+
+- Transient provider failures (`408`, `425`, `429`, `500`, `502`, `503`, `504`, rate-limit, quota and capacity errors) are now retried by resuming the same Codex thread instead of being returned to WeChat immediately.
+- Long-running tasks no longer stop after a fixed number of recovery retries or missing-final-report attempts; they keep recovering until Codex returns a result or the task is cancelled.
+- Updated repository links in the README, package metadata and the management page to `Vicky0749/codex-weixin`.
+
+### Fixed
+
+- WeChat replies that fail with a transient `sendmessage` error are retried (3 attempts by default, 5 for account sessions); a stale context token is dropped and the send is retried without it.
+- Final replies that still cannot be delivered are queued and sent the next time the user messages the bot, instead of being lost.
+- Switching API profiles now clears saved Codex thread IDs for every session, so the next message starts a fresh thread instead of resuming a stale one.
+- The Windows startup launcher now ships in the package (`scripts/codex-weixin-launcher.ps1`) and retries startup up to 3 times, writing logs to `%LOCALAPPDATA%\CodexWeixin\logs`.
+
 ## [0.3.10] - 2026-08-07
 
 ### Fixed
