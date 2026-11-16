@@ -201,7 +201,7 @@ test("local API redacts credentials and protects mutations", async (t) => {
   assert.match(pageHtml, /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml">/);
   assert.match(
     pageHtml,
-    /href="https:\/\/github\.com\/vincentw0749-collab\/codex-weixin" target="_blank" rel="noopener noreferrer"/
+    /href="https:\/\/github\.com\/Vicky0749\/codex-weixin" target="_blank" rel="noopener noreferrer"/
   );
   assert.match(pageHtml, /id="updateCheckButton"/);
   assert.match(pageHtml, /id="startupToggleInput"/);

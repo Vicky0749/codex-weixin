@@ -4,13 +4,13 @@
   "description": "Codex 微信 ClawBot: local multi-account WeChat bridge for OpenAI Codex.",
   "license": "MIT",
   "author": "Xuechao Zou",
-  "homepage": "https://github.com/vincentw0749-collab/codex-weixin#readme",
+  "homepage": "https://github.com/Vicky0749/codex-weixin#readme",
   "bugs": {
-    "url": "https://github.com/vincentw0749-collab/codex-weixin/issues"
+    "url": "https://github.com/Vicky0749/codex-weixin/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vincentw0749-collab/codex-weixin.git"
+    "url": "git+https://github.com/Vicky0749/codex-weixin.git"
   },
   "keywords": [
     "codex",
