@@ -102,7 +102,7 @@ codex-weixin
 也可以从源码安装：
 
 ```bash
-git clone https://github.com/vincentw0749-collab/codex-weixin.git
+git clone https://github.com/Vicky0749/codex-weixin.git
 cd codex-weixin
 npm install
 npm run build
